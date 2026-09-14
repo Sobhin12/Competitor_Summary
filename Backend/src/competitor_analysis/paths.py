@@ -41,6 +41,7 @@ ASSETS_DIR = DATA_DIR / "assets"
 LOGO_DIR = ASSETS_DIR / "logos"
 SOURCE_LINKS_FILE = DATA_DIR / "source_links.json"
 DATA_ENGINE_TEMPLATE = TEMPLATES_DIR / "Data_Engine_Template.xlsx"
+PROMPTS_DIR = PACKAGE_DIR / "prompts"
 
 # ---- outputs ------------------------------------------------------------
 ARTIFACTS_DIR = BACKEND_ROOT / "artifacts"

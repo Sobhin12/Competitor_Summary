@@ -6,8 +6,11 @@ skip a panel entirely (no empty box, no "not available" placeholder) when
 the underlying data is absent, per the report's "only show what we have"
 rule.
 """
+import math
+
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.patches import FancyBboxPatch
 from matplotlib.ticker import PercentFormatter
 
 from competitor_analysis.reporting import theme
@@ -78,13 +81,14 @@ def _style_bar_axes(ax, is_percent):
     if is_percent:
         ax.yaxis.set_major_formatter(PercentFormatter(1.0))
     ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", color=theme.GRID_COLOR, linewidth=0.6, zorder=0)
-    ax.set_axisbelow(True)
 
 
 def _make_broken_axes(fig, subplot_spec, top_ratio=0.32):
+    # hspace=0: the two axes sit flush against each other, so a bar spanning
+    # the break reads as one continuous bar (just visually cut by the
+    # diagonal break marks) rather than two blocks with a gap between them.
     inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=subplot_spec,
-                                              height_ratios=[top_ratio, 1], hspace=0.08)
+                                              height_ratios=[top_ratio, 1], hspace=0)
     ax_top = fig.add_subplot(inner[0])
     ax_bot = fig.add_subplot(inner[1])
     return ax_top, ax_bot
@@ -107,16 +111,72 @@ def _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=0.0)
     ax_bot.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)
 
 
-def doughnut_pair(fig, subplot_spec, prior_title, current_title, labels, prior_values, current_values,
-                   colors, unit_label=None):
-    """Two side-by-side doughnuts (prior/current) with each ring's total in
-    the center. Returns False (draws nothing) if both periods are fully empty."""
+def panel_box(fig, subplot_spec, title=None, unit_label=None, pad_x=0.014, pad_bottom=0.06, pad_top=0.045):
+    """Dashed rounded box wrapping subplot_spec's area, with an optional
+    centered title and a top-right unit_label (e.g. "INR Crores") both
+    inside the box, on their own row above the chart content. The caller
+    still uses `subplot_spec` itself (via fig.add_subplot) for its chart
+    axes - this only draws the frame/labels around it. `pad_bottom` defaults
+    generously so a legend drawn just below the axes (bbox_to_anchor y<0, as
+    stacked_bar's own legend is) still lands inside the box instead of
+    poking out under it."""
+    bbox = subplot_spec.get_position(fig)
+    box = FancyBboxPatch((bbox.x0 - pad_x, bbox.y0 - pad_bottom),
+                          (bbox.x1 - bbox.x0) + 2 * pad_x, (bbox.y1 - bbox.y0) + pad_bottom + pad_top,
+                          transform=fig.transFigure, boxstyle="round,pad=0,rounding_size=0.012",
+                          linewidth=1, edgecolor=theme.INSIGHT_BORDER, facecolor="none",
+                          linestyle=(0, (5, 3)), clip_on=False)
+    fig.add_artist(box)
+    row_y = bbox.y1 + pad_top / 2
+    if title:
+        fig.text((bbox.x0 + bbox.x1) / 2, row_y, title, fontsize=11, fontweight="bold", color=theme.DARK_TEXT,
+                  ha="center", va="center", transform=fig.transFigure)
+    if unit_label:
+        fig.text(bbox.x1 - pad_x - 0.004, row_y, unit_label, fontsize=7.5, style="italic",
+                  color=theme.GREY_TEXT, ha="right", va="center", transform=fig.transFigure)
+
+
+def _indian_grouping(n):
+    """'307666' -> '3,07,666': last 3 digits, then pairs going left - the
+    lakh/crore grouping the reference deck uses throughout for Rs. figures,
+    not Western 3-digit grouping (which agrees with it below 1,00,000 but
+    diverges above)."""
+    sign = "-" if n < 0 else ""
+    s = f"{abs(round(n)):.0f}"
+    if len(s) <= 3:
+        return sign + s
+    last3, rest = s[-3:], s[:-3]
+    groups = []
+    while len(rest) > 2:
+        groups.insert(0, rest[-2:])
+        rest = rest[:-2]
+    if rest:
+        groups.insert(0, rest)
+    return sign + ",".join(groups) + "," + last3
+
+
+def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, labels, prior_values,
+                   current_values, colors, group_label=None, unit_label=None, value_fmt=None):
+    """Two side-by-side doughnuts (prior/current), reference-deck style: each
+    slice's share is called out just outside the ring (name + %), its
+    absolute value sits inside the ring in bold white, and the ring's own
+    total plus group/period label sit stacked in the doughnut hole - no
+    legend. The pair is framed in a dashed rounded box with `unit_label`
+    (e.g. "INR Crores") pinned inside its top-right corner.
+
+    `value_fmt`, if given, formats both the inside-wedge and center-total
+    numbers (default: Indian lakh/crore grouping) - pass e.g.
+    `lambda v: f"{v * 100:.1f}%"` for a doughnut whose values are already
+    fractions of a whole (slide 10) rather than absolute Rs. Crore.
+
+    Returns False (draws nothing) if both periods are fully empty."""
+    value_fmt = value_fmt or _indian_grouping
     pairs_prior = [(l, v, c) for l, v, c in zip(labels, prior_values, colors) if v is not None]
     pairs_cur = [(l, v, c) for l, v, c in zip(labels, current_values, colors) if v is not None]
     if not pairs_prior and not pairs_cur:
         return False
-    inner = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=subplot_spec, wspace=0.4)
-    for i, (title, pairs) in enumerate([(prior_title, pairs_prior), (current_title, pairs_cur)]):
+    inner = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=subplot_spec, wspace=0.25)
+    for i, (period_label, pairs) in enumerate([(prior_period_label, pairs_prior), (current_period_label, pairs_cur)]):
         ax = fig.add_subplot(inner[i])
         if not pairs:
             ax.axis("off")
@@ -125,26 +185,103 @@ def doughnut_pair(fig, subplot_spec, prior_title, current_title, labels, prior_v
         vals = [v for _, v, _ in pairs]
         labs = [l for l, _, _ in pairs]
         cols = [c for _, _, c in pairs]
+        total = sum(vals)
 
         def _autopct(pct):
-            # Suppress the label for slices too thin (<3%) to fit legible
-            # text - avoids overlapping labels crowding around tiny wedges.
-            return f"{pct:.1f}%" if pct >= 3 else ""
+            # matplotlib hands autopct the slice's share (0-100), computed
+            # from the same `vals` this closure already has - reconstructing
+            # the absolute value from it (v = pct/100 * total) is exact,
+            # since that's precisely how matplotlib derived pct in the first
+            # place, and avoids a second, potentially misaligned pass over
+            # `vals` by wedge index.
+            v = pct / 100 * total
+            return value_fmt(v) if pct >= 3 else ""
 
-        wedges, _, autotexts = ax.pie(vals, colors=cols, autopct=_autopct, pctdistance=0.8,
-                                       wedgeprops=dict(width=0.45, edgecolor="white"),
-                                       textprops={"fontsize": 7})
+        wedges, _, autotexts = ax.pie(
+            vals, colors=cols, autopct=_autopct, pctdistance=0.73,
+            wedgeprops=dict(width=0.55, edgecolor="white"), startangle=90)
         for t in autotexts:
             t.set_fontsize(7)
-        total = sum(vals)
-        ax.text(0, 0, f"{total:,.0f}", ha="center", va="center", fontsize=10, fontweight="bold")
-        ax.set_title(title, fontsize=10, fontweight="bold", pad=2)
-        ax.legend(wedges, labs, loc="upper center", bbox_to_anchor=(0.5, -0.02), fontsize=6.5,
-                   ncol=2, frameon=False)
+            t.set_fontweight("bold")
+            t.set_color("white")
+
+        # A thin wedge's value can be wider than the wedge itself - measuring
+        # that needs a real layout pass (text extent isn't known until
+        # something has been drawn), so force one before checking. Anything
+        # that doesn't fit is slid along the ring - same radius, angled off
+        # its own wedge's center toward whichever neighbor has more room -
+        # rather than pushed radially out past the ring: it stays on the
+        # colored band (so it keeps its white color) and only borrows a
+        # little of the wider neighbor's arc, the way a hand-built deck
+        # nudges a label that doesn't fit its own slice. If even borrowing
+        # the most we're willing to (45% of that neighbor's own span) still
+        # isn't enough, the wedge is just too small for this value to be
+        # shown at all - drop it rather than force an illegible overlap.
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        n = len(wedges)
+        spans = [w.theta2 - w.theta1 for w in wedges]
+        for wi, (w, t) in enumerate(zip(wedges, autotexts)):
+            if not t.get_text():
+                continue
+            text_w = t.get_window_extent(renderer=renderer).width
+            own_span = math.radians(spans[wi])
+            chord = 2 * 0.73 * math.sin(own_span / 2)
+            p0, p1 = ax.transData.transform((0, 0)), ax.transData.transform((chord, 0))
+            chord_px = abs(p1[0] - p0[0])
+            if text_w <= chord_px * 0.92:
+                continue
+            prev_span, next_span = spans[(wi - 1) % n], spans[(wi + 1) % n]
+            toward_next = next_span >= prev_span
+            neighbor_span = math.radians(next_span if toward_next else prev_span)
+            scale = (chord_px / chord) if chord else 1
+            needed_rad = ((text_w - chord_px) / scale) / 0.73 if scale else 0
+            if needed_rad > neighbor_span * 0.45:
+                t.set_text("")
+                continue
+            bisector = math.radians((w.theta1 + w.theta2) / 2)
+            ang = bisector + (needed_rad if toward_next else -needed_rad)
+            t.set_position((0.73 * math.cos(ang), 0.73 * math.sin(ang)))
+
+        # Outside callout labels (name + share). Deliberately NOT ax.pie's
+        # own `labels=` kwarg: that always centers text on its anchor point,
+        # which for a wide wedge on the circle's left half runs the label
+        # straight back into the ring (and into the inside value text) -
+        # anchoring by the text's edge, on whichever side of the circle the
+        # wedge actually falls, keeps it growing outward instead.
+        for w, name, v in zip(wedges, labs, vals):
+            ang = math.radians((w.theta1 + w.theta2) / 2)
+            x, y = math.cos(ang), math.sin(ang)
+            pct = (v / total * 100) if total else 0
+            ax.annotate(f"{name}\n{pct:.1f}%", xy=(x, y), xytext=(1.22 * x, 1.15 * y),
+                        ha="left" if x >= 0 else "right", va="center", fontsize=7,
+                        color=theme.GREY_TEXT, annotation_clip=False)
+
+        lines = ([(group_label, 6.5, theme.DARK_TEXT)] if group_label else []) + [
+            (period_label, 6.5, theme.DARK_TEXT),
+            (value_fmt(total), 9, theme.DARK_TEXT),
+        ]
+        step = 0.11
+        y0 = (len(lines) - 1) / 2 * step
+        for j, (text, fontsize, color) in enumerate(lines):
+            ax.text(0, y0 - j * step, text, ha="center", va="center", fontsize=fontsize,
+                    fontweight="bold", color=color)
+
+    bbox = subplot_spec.get_position(fig)
+    pad_x, pad_bottom = 0.014, 0.018
+    box = FancyBboxPatch((bbox.x0 - pad_x, bbox.y0 - pad_bottom),
+                          (bbox.x1 - bbox.x0) + 2 * pad_x, (bbox.y1 - bbox.y0) + pad_bottom,
+                          transform=fig.transFigure, boxstyle="round,pad=0,rounding_size=0.012",
+                          linewidth=1, edgecolor=theme.INSIGHT_BORDER, facecolor="none",
+                          linestyle=(0, (5, 3)), clip_on=False)
+    fig.add_artist(box)
     if unit_label:
-        bbox = subplot_spec.get_position(fig)
-        fig.text(bbox.x1, bbox.y1 + 0.002, unit_label, fontsize=7.5, style="italic", color=theme.GREY_TEXT,
-                  ha="right", transform=fig.transFigure)
+        # Above the box, level with panel_title (report.py draws that at
+        # bbox.y1 + 0.002) rather than tucked inside the top-right corner -
+        # inside collides with whichever wedge's outside label lands near
+        # 12 o'clock, which a bigger ring makes more likely, not less.
+        fig.text(bbox.x1, bbox.y1 + 0.002, unit_label, fontsize=7.5, style="italic",
+                  color=theme.GREY_TEXT, ha="right", transform=fig.transFigure)
     return True
 
 
@@ -183,23 +320,28 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
 
     bottom_max, top_max = brk
     ax_top, ax_bot = _make_broken_axes(fig, subplot_spec)
-    # Zero out each axis's copy of a bar that doesn't belong to its cluster
-    # (rather than drawing the real height everywhere and relying on ylim to
-    # clip the rest away) - clipping a real bar right at the axis boundary
-    # can leave a stray sliver of its top edge visible from anti-aliasing.
-    pri_top = [v if v > bottom_max else 0 for v in pri]
-    cur_top = [v if v > bottom_max else 0 for v in cur]
-    pri_bot = [v if v <= bottom_max else 0 for v in pri]
-    cur_bot = [v if v <= bottom_max else 0 for v in cur]
-    b1t, b2t = ax_top.bar([i - w / 2 for i in x], pri_top, width=w, label=prior_label, color=theme.PRIOR_COLOR), \
-        ax_top.bar([i + w / 2 for i in x], cur_top, width=w, label=current_label, color=theme.CURRENT_COLOR)
+    # Draw each bar's REAL height on both axes and let each axis's own ylim
+    # (set below, with 28%/15% headroom on the bottom/top clusters
+    # respectively) clip away whatever doesn't belong to it. This is what
+    # makes a tall bar read as ONE bar interrupted by the break instead of a
+    # short one floating in ax_top with nothing connecting it down to zero -
+    # which is what zeroing out each axis's "other" copy (the previous
+    # approach here) produces, since ax_bot's copy of a tall bar was 0.
+    # Headroom keeps every bar's true top comfortably clear of its own
+    # axis's ylim, so clipping a bar at the OTHER axis's boundary happens
+    # mid-bar, not at a top edge, avoiding the antialiasing sliver a
+    # boundary-hugging clip could otherwise leave.
+    b1t = ax_top.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
+    b2t = ax_top.bar([i + w / 2 for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
     ax_top.set_xticks(x)
-    b1b = ax_bot.bar([i - w / 2 for i in x], pri_bot, width=w, label=prior_label, color=theme.PRIOR_COLOR)
-    b2b = ax_bot.bar([i + w / 2 for i in x], cur_bot, width=w, label=current_label, color=theme.CURRENT_COLOR)
-    ax_top.bar_label(b1t, labels=[fmt(v) if v else "" for v in pri_top], fontsize=6.5, padding=1)
-    ax_top.bar_label(b2t, labels=[fmt(v) if v else "" for v in cur_top], fontsize=6.5, padding=1)
-    ax_bot.bar_label(b1b, labels=[fmt(v) if v else "" for v in pri_bot], fontsize=6.5, padding=1)
-    ax_bot.bar_label(b2b, labels=[fmt(v) if v else "" for v in cur_bot], fontsize=6.5, padding=1)
+    b1b = ax_bot.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
+    b2b = ax_bot.bar([i + w / 2 for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
+    # Label only the axis a bar's true value actually falls in, so a tall
+    # bar isn't labeled twice (once in each panel).
+    ax_top.bar_label(b1t, labels=[fmt(v) if v > bottom_max else "" for v in pri], fontsize=6.5, padding=1)
+    ax_top.bar_label(b2t, labels=[fmt(v) if v > bottom_max else "" for v in cur], fontsize=6.5, padding=1)
+    ax_bot.bar_label(b1b, labels=[fmt(v) if v <= bottom_max else "" for v in pri], fontsize=6.5, padding=1)
+    ax_bot.bar_label(b2b, labels=[fmt(v) if v <= bottom_max else "" for v in cur], fontsize=6.5, padding=1)
     lo = min(0, min(pri + cur))
     _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=lo)
     ax_bot.set_xticks(x)
@@ -233,56 +375,84 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
 
     bottom_max, top_max = brk
     ax_top, ax_bot = _make_broken_axes(fig, subplot_spec)
-    # Zero out each axis's copy of a bar that doesn't belong to its cluster
-    # (rather than drawing the real height everywhere and relying on ylim to
-    # clip the rest away) - clipping a real bar right at the axis boundary
-    # can leave a stray sliver of its top edge visible from anti-aliasing.
-    vals_top = [v if v > bottom_max else 0 for v in vals]
-    vals_bot = [v if v <= bottom_max else 0 for v in vals]
-    bars_top = ax_top.bar(cats, vals_top, color=color or theme.BLUE)
-    bars_bot = ax_bot.bar(cats, vals_bot, color=color or theme.BLUE)
-    ax_top.bar_label(bars_top, labels=[fmt(v) if v else "" for v in vals_top], fontsize=7, padding=1)
-    ax_bot.bar_label(bars_bot, labels=[fmt(v) if v else "" for v in vals_bot], fontsize=7, padding=1)
+    # Draw each bar's REAL height on both axes and let each axis's own ylim
+    # clip away whatever doesn't belong to it, so a tall bar reads as ONE
+    # bar interrupted by the break instead of a short one floating in
+    # ax_top with nothing connecting it down to zero - see grouped_bar's
+    # longer version of this comment for why (same fix, same reason).
+    bars_top = ax_top.bar(cats, vals, color=color or theme.BLUE)
+    bars_bot = ax_bot.bar(cats, vals, color=color or theme.BLUE)
+    ax_top.bar_label(bars_top, labels=[fmt(v) if v > bottom_max else "" for v in vals], fontsize=7, padding=1)
+    ax_bot.bar_label(bars_bot, labels=[fmt(v) if v <= bottom_max else "" for v in vals], fontsize=7, padding=1)
     lo = min(0, min(vals))
     _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=lo)
     ax_bot.tick_params(axis="x", labelsize=8)
     return True
 
 
-def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=True):
-    """series_dict: {series_name: [value_per_category, ...]}."""
+def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=True, show_totals=False,
+                 show_yaxis=True):
+    """series_dict: {series_name: [value_per_category, ...]}.
+
+    `show_totals`, if set, annotates each bar's own absolute total (the
+    per-category sum across all series, before any pct100 normalization -
+    already computed as `totals` below regardless of that flag) just above
+    the bar, in Indian lakh/crore grouping - for a pct100 chart, this is how
+    a reader sees both the mix (%, inside each segment) and the underlying
+    scale (the absolute total, above the bar) at once.
+
+    `show_yaxis=False` drops the y tick labels/ticks and the left spine -
+    for a pct100 chart with `value_labels` on, the % already printed inside
+    each segment makes the axis redundant."""
     n = len(categories)
     present = [i for i in range(n) if any((v[i] is not None) for v in series_dict.values())]
     if not present:
         return False
     cats = [categories[i] for i in present]
     raw = {name: [vals[i] if vals[i] is not None else 0 for i in present] for name, vals in series_dict.items()}
+    totals = [sum(raw[name][j] for name in raw) or 1 for j in range(len(cats))]
     if pct100:
-        totals = [sum(raw[name][j] for name in raw) or 1 for j in range(len(cats))]
         data = {name: [raw[name][j] / totals[j] for j in range(len(cats))] for name in raw}
     else:
         data = raw
-        totals = [sum(raw[name][j] for name in raw) or 1 for j in range(len(cats))]
     bottoms = [0.0] * len(cats)
     for name, vals in data.items():
         bars = ax.bar(cats, vals, bottom=bottoms, label=name, color=colors.get(name, theme.ORANGE))
         if value_labels:
             # Suppress the label for a segment too small (<4% of its bar's
             # own total) to fit legibly - avoids overlapping text for
-            # near-zero segments, which otherwise render as an illegible cluster.
+            # near-zero segments, which otherwise render as an illegible
+            # cluster. In pct100 mode `v` is already that share (0-1) - `data`
+            # was normalized by `totals` above - so dividing by `tot` (the
+            # category's ABSOLUTE total) a second time here would compare a
+            # fraction against a Rs.-Crore-sized number and suppress every
+            # label unconditionally; only the raw-value branch needs the
+            # division to turn `v` into a share at all.
             labels = []
             for v, tot in zip(vals, totals):
-                if not v or v / tot < 0.04:
+                share = v if pct100 else (v / tot if tot else 0)
+                if not v or share < 0.04:
                     labels.append("")
                 else:
                     labels.append(f"{v * 100:.0f}%" if pct100 else _num_fmt(v))
             ax.bar_label(bars, labels=labels, label_type="center", fontsize=6, color="white")
         bottoms = [b + v for b, v in zip(bottoms, vals)]
+    if show_totals:
+        headroom = 0.03 if pct100 else max(bottoms) * 0.03
+        for x, (top, tot) in enumerate(zip(bottoms, totals)):
+            ax.text(x, top + headroom, _indian_grouping(tot), ha="center", va="bottom", fontsize=7.5,
+                    fontweight="bold", color=theme.DARK_TEXT)
     ax.tick_params(axis="x", labelsize=7, rotation=0)
-    ax.tick_params(axis="y", labelsize=7)
     if pct100:
-        ax.set_ylim(0, 1.05)
+        ax.set_ylim(0, 1.16 if show_totals else 1.05)
         ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+    elif show_totals:
+        ax.set_ylim(0, max(bottoms) * 1.12)
+    if show_yaxis:
+        ax.tick_params(axis="y", labelsize=7)
+    else:
+        ax.tick_params(axis="y", left=False, labelleft=False)
+        ax.spines["left"].set_visible(False)
     ax.legend(fontsize=6, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=min(len(data), 5))
     ax.spines[["top", "right"]].set_visible(False)
     return True

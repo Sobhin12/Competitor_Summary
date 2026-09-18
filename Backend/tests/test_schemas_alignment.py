@@ -43,9 +43,21 @@ def test_schema_fields_match_metric_registry_exactly():
         )
 
 
-def test_no_form_exceeds_twenty_fields():
+def test_no_form_exceeds_a_sane_field_count():
+    """Not the real constraint - gemini._batches() slices the whole flat
+    metric list into <=DEFAULT_BATCH_SIZE-field calls regardless of which
+    form each field belongs to, and reassembles a form's results by key
+    across however many batches its fields ended up in (see
+    extract_company_metrics_async) - a form legitimately spanning several
+    batches costs nothing extra, since every form's PDF pages are scanned
+    once up front regardless. NL-34 (every state/UT) is the one form that
+    actually does this today, at 38 fields / ~2 batches.
+
+    This is just a loose sanity ceiling against a form growing unbounded by
+    accident - not the actual per-call limit, which DEFAULT_BATCH_SIZE
+    enforces regardless of form boundaries."""
     for form, model in schemas.FORM_SCHEMAS.items():
-        assert len(model.model_fields) <= 20, f"{form} has {len(model.model_fields)} fields"
+        assert len(model.model_fields) <= 40, f"{form} has {len(model.model_fields)} fields"
 
 
 def test_wire_schema_matches_extracted_value_fields():

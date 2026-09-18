@@ -108,6 +108,7 @@ FORM_PATTERNS = {
     "NL-5": ("Claims Schedule (NL-5)", r"FORM\s+NL-5"),
     "NL-6": ("Commission Schedule (NL-6)", r"FORM\s+NL-6"),
     "NL-7": ("Operating Expenses Schedule (NL-7)", r"FORM\s+NL-7"),
+    "NL-10": ("Statement of Changes in Equity (NL-10)", r"FORM\s+NL-10"),
     "NL-12": ("Investment Schedule (NL-12 & 12A)", r"FORM\s+NL-12"),
     "NL-20": ("Analytical Ratios Schedule (NL-20)", r"FORM\s+NL-20"),
     # Care Health's filing heads this schedule "NL-29 DETAILS REGARDING DEBT
@@ -124,6 +125,7 @@ FORM_PATTERNS = {
     "NL-34": ("Geographical Distribution of Business (NL-34)", r"FORM\s+NL-34"),
     "NL-36": ("Business - Channels Wise (NL-36)", r"FORM\s+NL-36"),
     "NL-37": ("Claims Data (NL-37)", r"FORM\s+NL-37"),
+    "NL-39": ("Ageing of Claims (NL-39)", r"FORM\s+NL-39"),
     "NL-41": ("Offices Information (NL-41)", r"FORM\s+NL-41"),
 }
 

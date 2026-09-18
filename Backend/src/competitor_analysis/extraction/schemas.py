@@ -49,7 +49,19 @@ CHANNELS_36 = [
     ("Web Aggregators", "Web Aggregator"),
     ("Point of Sales person / POS", "POS"),
 ]
-STATES = ["Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana", "Tamil Nadu", "Kerala", "Delhi", "Others"]
+STATES = [
+    "Maharashtra", "Delhi", "Uttar Pradesh", "Karnataka", "Gujarat", "Haryana", "Telangana",
+    "Tamil Nadu", "Punjab", "Kerala", "Rajasthan", "West Bengal", "Madhya Pradesh", "Andhra Pradesh",
+    "Bihar", "Odisha", "Chhattisgarh", "Uttarakhand", "Jharkhand", "Assam", "Chandigarh", "Goa",
+    "Himachal Pradesh", "Jammu & Kashmir", "Tripura", "Manipur", "Puducherry", "Meghalaya",
+    "Daman & Diu", "Dadra and Nagar Haveli", "Arunachal Pradesh", "Nagaland", "Sikkim", "Mizoram",
+    "Ladakh", "Andaman and Nicobar Islands", "Lakshadweep",
+    "Others",
+]
+# Slide 17 only ever shows these 7 as their own rows (matches the reference
+# report exactly) - every other state above gets summed into Slide 17's
+# "Others", but still contributes individually to Slide 16's zone totals.
+STATES8_NAMED = ["Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana", "Tamil Nadu", "Kerala", "Delhi"]
 DEBT_RATINGS = [
     ("Sovereign", "Any other (Sovereign)"), ("AAA rated", "AAA rated"),
     ("AA or better", "AA or better"),
@@ -133,7 +145,6 @@ class NL3(BaseModel):
 
     capital: ExtractedValue
     bs_reserves_surplus: ExtractedValue
-    bs_fair_value_change_sh: ExtractedValue
     bs_debit_balance_pl: ExtractedValue
 
 
@@ -156,27 +167,21 @@ class NL7(BaseModel):
 
 
 class NL12(BaseModel):
-    """Investment Schedule (NL-12 & 12A): portfolio breakdown + AUM."""
+    """Investment Schedule (NL-12 & 12A): AUM only (Slide 24's asset-class
+    breakdown comes from NL-31 instead, see gemini.master_metric_specs)."""
     model_config = _CONFIG
 
-    inv_govt_bonds: ExtractedValue
-    inv_corporate_bonds: ExtractedValue
-    inv_deposits: ExtractedValue
-    inv_equity: ExtractedValue
-    inv_mutual_funds: ExtractedValue
     aum_total: ExtractedValue
     aum_shareholders: ExtractedValue
     aum_policyholders: ExtractedValue
 
 
 class NL20(BaseModel):
-    """Analytical Ratios Schedule (NL-20)."""
+    """Analytical Ratios Schedule (NL-20). Combined/Loss/Expense/EOM Ratios
+    are computed from components elsewhere (data_engine.py) rather than
+    read from this form - see gemini.master_metric_specs's NL-20 comment."""
     model_config = _CONFIG
 
-    combined_ratio: ExtractedValue
-    loss_ratio: ExtractedValue
-    expense_ratio_nwp: ExtractedValue
-    eom_ratio_gdp: ExtractedValue
     solvency_ratio: ExtractedValue
 
 
@@ -220,6 +225,7 @@ class NL37(BaseModel):
     claims_os_start: ExtractedValue
     claims_reported: ExtractedValue
     claims_settled: ExtractedValue
+    claims_os_end: ExtractedValue
 
 
 NL41 = create_model(

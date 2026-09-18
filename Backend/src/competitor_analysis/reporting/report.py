@@ -489,40 +489,31 @@ def slide_15(pdf, rows):
 
 
 STATES8 = ["Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana", "Tamil Nadu", "Kerala", "Delhi", "Others"]
-STATE_TO_ZONE = {
-    "Uttar Pradesh": "North", "Haryana": "North", "Delhi": "North",
-    "Maharashtra": "West",
-    "Karnataka": "South", "Tamil Nadu": "South", "Kerala": "South",
-}
 
 
 def slide_16(pdf, rows):
-    # Derived from Slide 17's named-state data (standard MHA zonal
-    # convention) rather than extracted directly - see Glossary.
-    cdata = data.by_company(rows, 17, theme.canonical_company)
+    # Zone rows are already computed and written into the Data Engine during
+    # Phase 2 (extraction/data_engine.py's STATE_TO_ZONE derivation) - this
+    # just reads them, like every other slide, rather than re-deriving zones
+    # from Slide 17's state data at render time.
+    cdata = data.by_company(rows, 16, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
     if not keys:
         return
     names = disp_names(keys)
-    zones = ["North", "West", "South", "Others (unclassified)"]
-
-    def zone_value(company_key, zone):
-        states = [s for s in STATES8 if s not in STATE_TO_ZONE] if zone == "Others (unclassified)" \
-            else [s for s, z in STATE_TO_ZONE.items() if z == zone]
-        vals = [cdata[company_key].get((s, None), (None, None))[0] for s in states]
-        vals = [v for v in vals if v is not None]
-        return round(sum(vals), 4) if vals else None
-
-    series = {z: [zone_value(k, z) for k in keys] for z in zones}
+    zones = ["North", "South", "East", "West", "Central", "Others (unclassified)"]
+    series = {z: [cdata[k].get((z, None), (None, None))[0] for k in keys] for z in zones}
     if not any(any(v is not None for v in vals) for vals in series.values()):
         return
-    colors = {"North": theme.SEGMENT_COLORS["Public"], "West": theme.SEGMENT_COLORS["Private"],
-              "South": theme.SEGMENT_COLORS["SAHI"], "Others (unclassified)": "#BFBFBF"}
+    colors = {"North": theme.SEGMENT_COLORS["Public"], "South": theme.SEGMENT_COLORS["SAHI"],
+              "East": "#70AD47", "West": theme.SEGMENT_COLORS["Private"], "Central": "#7C3AED",
+              "Others (unclassified)": "#BFBFBF"}
     fig, panels, ins = new_page("Geographical Distribution: Zones", 16, 1, want_insights=True)
     ax = fig.add_subplot(panels[0])
     charts.stacked_bar(ax, names, series, colors, pct100=True)
-    draw_insights(fig, ins, ["Zone split is a best-effort estimate from named-state data - East/Central "
-                             "exposure isn't separately identifiable this quarter (see Glossary)."])
+    draw_insights(fig, ins, ["Zone split is derived from named-state data (standard MHA zonal "
+                             "convention) - a state a company didn't separately disclose falls "
+                             "under \"Others (unclassified)\" rather than being guessed at."])
     pdf.savefig(fig)
     plt.close(fig)
 

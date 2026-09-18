@@ -180,6 +180,28 @@ PSU_INSURERS = {
     "The New India Assurance Co Ltd",
     "The Oriental Insurance Co Ltd",
     "United India Insurance Co Ltd",
+    "National Insurance Co Ltd",
+}
+
+# Slide 16's North/South/East/West/Central zone split, derived below from
+# Slide 17's per-state values. Deliberately covers every India state/UT, not
+# just the ones gemini_extract.STATES currently asks NL-34 to extract by name
+# (Uttar Pradesh, Maharashtra, Karnataka, Haryana, Tamil Nadu, Kerala, Delhi)
+# - so if that list is ever expanded, this table is already ready rather than
+# needing a second update. Any state not a key here (today, that's every
+# state gemini_extract.STATES doesn't name, all folded into its "Others")
+# lands in "Others (unclassified)" instead of being guessed into a region.
+STATE_TO_ZONE = {
+    "Maharashtra": "West", "Delhi": "North", "Uttar Pradesh": "North", "Karnataka": "South",
+    "Gujarat": "West", "Haryana": "North", "Telangana": "Central", "Tamil Nadu": "South",
+    "Punjab": "North", "Kerala": "South", "Rajasthan": "North", "West Bengal": "East",
+    "Madhya Pradesh": "Central", "Andhra Pradesh": "Central", "Bihar": "East", "Odisha": "Central",
+    "Chhattisgarh": "Central", "Uttarakhand": "North", "Jharkhand": "East", "Assam": "East",
+    "Chandigarh": "North", "Goa": "West", "Himachal Pradesh": "North", "Jammu & Kashmir": "North",
+    "Tripura": "East", "Manipur": "East", "Puducherry": "South", "Meghalaya": "East",
+    "Daman & Diu": "West", "Dadra and Nagar Haveli": "West", "Arunachal Pradesh": "East",
+    "Nagaland": "East", "Sikkim": "East", "Mizoram": "East", "Ladakh": "North",
+    "Andaman and Nicobar Islands": "South", "Lakshadweep": "South",
 }
 
 SAHI_ROW_LABELS = {
@@ -821,15 +843,26 @@ def extract_income_statement(company_short, pdf_path):
         nl2_text, _ = get_form_text(pdf_path, r"FORM\s+NL-2-B-PL")
 
     if nl4:
-        gwp = get_line_item(nl4, "Gross Direct Premium")
+        gdp = get_line_item(nl4, "Gross Direct Premium")
+        ri_accepted = get_line_item_any(nl4, [("Premium on reinsurance accepted",), ("reinsurance accepted",)])
         nwp = get_line_item(nl4, "Net Written Premium")
         ep = get_line_item_any(nl4, [("Net Earned Premium",), ("Total Premium Earned (Net)",), ("Premium Earned (Net)",)])
     elif nl4_text:
-        gwp = get_line_item_from_text(nl4_text, "Gross Direct Premium", form="NL-4")
+        gdp = get_line_item_from_text(nl4_text, "Gross Direct Premium", form="NL-4")
+        ri_accepted = get_line_item_from_text(nl4_text, "reinsurance accepted", form="NL-4")
         nwp = get_line_item_from_text(nl4_text, "Net Written Premium", form="NL-4")
         ep = get_line_item_from_text(nl4_text, "Earned Premium", form="NL-4")
     else:
-        gwp = nwp = ep = (None, None)
+        gdp = ri_accepted = nwp = ep = (None, None)
+
+    def _add(a, b):
+        # "Add: Premium on reinsurance accepted" is "-"/blank for most
+        # insurers most quarters - treat a missing addend as 0, but a
+        # missing GDP itself still propagates as None (don't invent a GWP
+        # figure with no base premium at all).
+        return None if a is None else a + (b or 0)
+
+    gwp = (_add(gdp[0], ri_accepted[0]), _add(gdp[1], ri_accepted[1]))
     out["Gross Written Premium"] = tuple(lakhs_to_cr(v) for v in gwp)
     out["Net Written Premium"] = tuple(lakhs_to_cr(v) for v in nwp)
     out["Earned Premium"] = tuple(lakhs_to_cr(v) for v in ep)
@@ -859,6 +892,46 @@ def extract_income_statement(company_short, pdf_path):
     else:
         commission = opex = (None, None)
         ph_interest = ph_profit_sale = (None, None)
+
+    # NL-1's own "Commission" and "Claims Incurred" lines already equal NL-6's
+    # Net Commission and NL-5's Net Incurred Claims verbatim (NL-1 cites them
+    # by schedule number and restates their grand totals - verified against
+    # this same filing: both pairs match exactly) - reused here rather than
+    # re-fetching NL-5/NL-6 a second time for the same figures.
+    out["Net Commission"] = tuple(lakhs_to_cr(v) for v in commission)
+    out["Net Incurred Claims"] = tuple(lakhs_to_cr(v) for v in claims)
+
+    # Gross Commission and Commission on Re-insurance Accepted are only on
+    # NL-6 itself (NL-1 nets them away into the single "Commission" line
+    # above) - needed for the EOM Ratio formula.
+    nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
+    nl6_text = None
+    if nl6 is None:
+        nl6_text, _ = get_form_text(pdf_path, r"FORM\s+NL-6")
+    if nl6:
+        gross_commission = get_line_item(nl6, "Gross Commission")
+        ri_accepted_commission = get_line_item(nl6, "Commission on Re-insurance Accepted")
+    elif nl6_text:
+        gross_commission = get_line_item_from_text(nl6_text, "Gross Commission", form="NL-6")
+        ri_accepted_commission = get_line_item_from_text(nl6_text, "Commission on Re-insurance Accepted", form="NL-6")
+    else:
+        gross_commission = ri_accepted_commission = (None, None)
+    out["Gross Commission"] = tuple(lakhs_to_cr(v) for v in gross_commission)
+    out["RI Accepted Commission"] = tuple(lakhs_to_cr(v) for v in ri_accepted_commission)
+
+    # GST is only on NL-7 (item 16, "Goods and Services Tax (GST)") - needed
+    # for the EOM Ratio formula, which excludes it from Opex.
+    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7")
+    nl7_text = None
+    if nl7 is None:
+        nl7_text, _ = get_form_text(pdf_path, r"FORM\s+NL-7")
+    if nl7:
+        gst = get_line_item(nl7, "Goods and Services Tax")
+    elif nl7_text:
+        gst = get_line_item_from_text(nl7_text, "Goods and Services Tax", form="NL-7")
+    else:
+        gst = (None, None)
+    out["GST"] = tuple(lakhs_to_cr(v) for v in gst)
 
     # NL-2's "TOTAL (B)" line is PROVISIONS (Other than Taxation, section 4)
     # plus OTHER EXPENSES (section 5) combined - verified against NBHI's own
@@ -892,6 +965,9 @@ def extract_income_statement(company_short, pdf_path):
         pat = get_line_item(nl2, "after tax")
         nl2_total_b = get_line_item(nl2, "TOTAL", "(B)")
         nl2_contribution = sum_rows_after(nl2, ("Contribution to Policyholders",), STOP_AFTER_CONTRIBUTION_GROUP)
+        # "(f)(ii) Towards remuneration of MD/CEO/WTD/Other KMPs" - needed for
+        # the EOM Ratio formula, which subtracts it out of Opex.
+        ceo_remuneration = get_line_item(nl2, "remuneration of MD")
         out["PBT"] = tuple(lakhs_to_cr(v) for v in pbt)
         out["PAT"] = tuple(lakhs_to_cr(v) for v in pat)
     elif nl2_text:
@@ -924,11 +1000,14 @@ def extract_income_statement(company_short, pdf_path):
                 nl2_contribution = get_line_item_from_text(nl2_text, *variant, form="NL-2")
                 if nl2_contribution != (None, None):
                     break
+        ceo_remuneration = get_line_item_from_text(nl2_text, "remuneration of MD", form="NL-2")
         out["PBT"] = tuple(lakhs_to_cr(v) for v in pbt)
         out["PAT"] = tuple(lakhs_to_cr(v) for v in pat)
     else:
         sh_interest = sh_profit_sale = sh_loss_sale = sh_amort = (None, None)
         nl2_total_b = nl2_contribution = (None, None)
+        ceo_remuneration = (None, None)
+    out["CEO Remuneration"] = tuple(lakhs_to_cr(v) for v in ceo_remuneration)
 
     def sum_available(*pairs):
         """Sum whichever pairs have a value for each period - None only when
@@ -963,44 +1042,68 @@ def extract_income_statement(company_short, pdf_path):
     out["Total Overheads"] = tuple(lakhs_to_cr(v) for v in overheads)
 
     out["Investment Yield"] = extract_investment_yield(pdf_path)
+    out["Investment Portfolio"] = extract_investment_portfolio(pdf_path)
+    out["Average Claim Size"] = extract_average_claim_size(pdf_path)
+    out["Cumulative Capital"] = extract_cumulative_capital(pdf_path)
 
     return out
+
+
+def _nl31_cell_num(row, idx):
+    if idx >= len(row) or row[idx] is None:
+        return None
+    s = re.sub(r"\s+", "", str(row[idx])).replace("%", "").replace(",", "")
+    if s in ("", "-"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _nl31_table_and_blocks(pdf_path):
+    """Locates NL-31's table and its two YTD column blocks (current/prior).
+    Returns (table, cur_start, prior_start), or (None, None, None) if the
+    form or its blocks can't be found. Shared by extract_investment_yield
+    (reads the TOTAL row only) and extract_investment_portfolio (reads
+    every per-category row)."""
+    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-31")
+    if not fp:
+        return None, None, None
+    table = fp.tables[0]
+    cur_start = prior_start = None
+    for row in table[:8]:
+        for i, cell in enumerate(row):
+            if not cell:
+                continue
+            text = " ".join(str(cell).split()).lower()
+            if "year to date" not in text and "period ended" not in text:
+                continue
+            # "previous"/"corresponding" phrasing, or the prior year
+            # itself printed in the header. The year comes from the
+            # configured period rather than a literal, so this still
+            # separates the two blocks in a later quarter.
+            _cur_frag, _prior_frag = pdf_extract_year_frags()
+            is_prior = ("previous" in text or "corresponding" in text
+                        or any(f.lstrip("-") in text for f in _prior_frag))
+            if is_prior:
+                prior_start = i if prior_start is None else min(prior_start, i)
+            else:
+                cur_start = i if cur_start is None else min(cur_start, i)
+    if cur_start is None or prior_start is None:
+        return None, None, None
+    return table, cur_start, prior_start
 
 
 def extract_investment_yield(pdf_path):
     """NL-31's own TOTAL row already carries a precomputed, annualized
     'Gross Yield (%)' - verified to match GT exactly (e.g. NBHI: 5.45% cur,
     5.55% prior), so this is read directly rather than computed from AUM.
-    Two header phrasings are seen across insurers, both a 4-column block
-    [Investment, Income, Gross Yield, Net Yield] repeated three times (this
-    quarter / YTD current year / YTD prior year) - locate each YTD block's
-    start column dynamically (by whichever phrasing matches) and take its
-    3rd sub-column.
+    Each YTD block is [Investment, Income, Gross Yield, Net Yield]; take
+    the TOTAL row's 3rd sub-column within each block.
     """
-    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-31")
-    if fp:
-        table = fp.tables[0]
-        cur_start = prior_start = None
-        for row in table[:8]:
-            for i, cell in enumerate(row):
-                if not cell:
-                    continue
-                text = " ".join(str(cell).split()).lower()
-                if "year to date" not in text and "period ended" not in text:
-                    continue
-                # "previous"/"corresponding" phrasing, or the prior year
-                # itself printed in the header. The year comes from the
-                # configured period rather than a literal, so this still
-                # separates the two blocks in a later quarter.
-                _cur_frag, _prior_frag = pdf_extract_year_frags()
-                is_prior = ("previous" in text or "corresponding" in text
-                            or any(f.lstrip("-") in text for f in _prior_frag))
-                if is_prior:
-                    prior_start = i if prior_start is None else min(prior_start, i)
-                else:
-                    cur_start = i if cur_start is None else min(cur_start, i)
-        if cur_start is None or prior_start is None:
-            return None, None
+    table, cur_start, prior_start = _nl31_table_and_blocks(pdf_path)
+    if table is not None:
         total_row = None
         for row in table:
             for cell in row:
@@ -1014,26 +1117,15 @@ def extract_investment_yield(pdf_path):
             # label blank - it's still reliably the table's last row.
             total_row = table[-1]
 
-        def cell_num(row, idx):
-            if idx >= len(row) or row[idx] is None:
-                return None
-            s = re.sub(r"\s+", "", str(row[idx])).replace("%", "").replace(",", "")
-            if s in ("", "-"):
-                return None
-            try:
-                return float(s)
-            except ValueError:
-                return None
-
         def yield_at(block_start):
             # Preferred: the row's own precomputed Gross Yield sub-column.
-            pct = cell_num(total_row, block_start + 2)
+            pct = _nl31_cell_num(total_row, block_start + 2)
             if pct is not None:
                 return pct / 100
             # Fallback (e.g. Star Health leaves this row's yield % blank):
             # derive it from the same row's Investment/Income sub-columns.
-            income = cell_num(total_row, block_start + 1)
-            investment = cell_num(total_row, block_start)
+            income = _nl31_cell_num(total_row, block_start + 1)
+            investment = _nl31_cell_num(total_row, block_start)
             return round(income / investment, 4) if income is not None and investment else None
 
         return yield_at(cur_start), yield_at(prior_start)
@@ -1044,6 +1136,164 @@ def extract_investment_yield(pdf_path):
     cur, prior = get_line_item_from_text(text, "TOTAL", cur_col=6, prior_col=10)
     return (round(cur / 100, 4) if cur is not None else None,
             round(prior / 100, 4) if prior is not None else None)
+
+
+# Slide 24: NL-31 lists investments as ~20-55 granular "Category of
+# Investment" rows, each carrying IRDAI's own 4-letter Category Code (e.g.
+# CGSB = Central Government Bonds) in its own column - verified against a
+# real filing (Niva Bupa FY26-27 Q1: 20 rows, every code present below).
+# CATEGORY_CODE_TO_BUCKET rolls every code up into the 5 buckets Slide 24
+# actually shows. This replaces the earlier approach of asking Gemini to
+# sum NL-12/12A's own GRAND TOTAL lines by description - wrong form for
+# this slide, and not deterministic.
+CATEGORY_CODE_TO_BUCKET = {
+    "CGSB": "Govt Bonds", "CGSL": "Govt Bonds", "CTRB": "Govt Bonds",
+    "SGGB": "Govt Bonds", "SGGL": "Govt Bonds",
+    "SGOA": "Corporate Bonds/Debentures", "HTDN": "Corporate Bonds/Debentures",
+    "HTDA": "Corporate Bonds/Debentures", "HTLN": "Corporate Bonds/Debentures",
+    "HTHD": "Corporate Bonds/Debentures", "ICCP": "Corporate Bonds/Debentures",
+    "IPTD": "Corporate Bonds/Debentures", "ICTD": "Corporate Bonds/Debentures",
+    "ICFD": "Corporate Bonds/Debentures", "IDDF": "Corporate Bonds/Debentures",
+    "EPBT": "Corporate Bonds/Debentures", "ILBI": "Corporate Bonds/Debentures",
+    "ECOS": "Corporate Bonds/Debentures", "ECCP": "Corporate Bonds/Debentures",
+    "HORD": "Corporate Bonds/Debentures", "IODS": "Corporate Bonds/Debentures",
+    "IORD": "Corporate Bonds/Debentures", "OLDB": "Corporate Bonds/Debentures",
+    "HODS": "Corporate Bonds/Debentures", "EINP": "Corporate Bonds/Debentures",
+    "EUPD": "Corporate Bonds/Debentures", "EPPD": "Corporate Bonds/Debentures",
+    "ECBO": "Corporate Bonds/Debentures", "EDPG": "Corporate Bonds/Debentures",
+    "ORAD": "Corporate Bonds/Debentures", "HDPG": "Corporate Bonds/Debentures",
+    "EAPB": "Corporate Bonds/Debentures", "EAPS": "Corporate Bonds/Debentures",
+    "ECDB": "Deposits", "EDCD": "Deposits", "ECMR": "Deposits",
+    "ECAM": "Equity/Invits/REIT", "OEPU": "Equity/Invits/REIT",
+    "EAEQ": "Equity/Invits/REIT", "ERIT": "Equity/Invits/REIT",
+    "OIIT": "Equity/Invits/REIT", "EETF": "Equity/Invits/REIT",
+    "OETF": "Equity/Invits/REIT", "EIIT": "Equity/Invits/REIT",
+    "ODCI": "Equity/Invits/REIT", "IDIT": "Equity/Invits/REIT",
+    "EDRT": "Equity/Invits/REIT", "OAFB": "Equity/Invits/REIT",
+    "OESH": "Equity/Invits/REIT", "EACE": "Equity/Invits/REIT",
+    "ITCE": "Equity/Invits/REIT", "ITPE": "Equity/Invits/REIT",
+    "EGMF": "Mutual Funds", "EMPG": "Mutual Funds", "OMGS": "Mutual Funds",
+}
+
+# Matches slide_24's series_names in reporting/report.py exactly.
+INVESTMENT_PORTFOLIO_BUCKETS = (
+    "Govt Bonds", "Corporate Bonds/Debentures", "Deposits", "Equity/Invits/REIT", "Mutual Funds",
+)
+
+
+def extract_investment_portfolio(pdf_path):
+    """Sums NL-31's per-category-code Investment (book value) rows into
+    Slide 24's 5 buckets via CATEGORY_CODE_TO_BUCKET. Returns
+    {bucket_label: (cur_cr, prior_cr)}; a bucket with no rows this quarter
+    is omitted rather than written as 0, same "don't guess" convention as
+    everywhere else in this file. A code not in the table is logged and
+    excluded, not silently dropped."""
+    table, cur_start, prior_start = _nl31_table_and_blocks(pdf_path)
+    if table is None:
+        return {}
+    cur_by_bucket, prior_by_bucket = {}, {}
+    for row in table:
+        code = row[2] if len(row) > 2 and row[2] else None
+        if not code:
+            continue
+        code = " ".join(str(code).split()).strip().upper()
+        bucket = CATEGORY_CODE_TO_BUCKET.get(code)
+        if bucket is None:
+            RESOLUTION_LOG.append(f"NL-31 category code {code!r} not in CATEGORY_CODE_TO_BUCKET - excluded from Slide 24")
+            continue
+        cur_v = _nl31_cell_num(row, cur_start)
+        prior_v = _nl31_cell_num(row, prior_start)
+        if cur_v is not None:
+            cur_by_bucket[bucket] = cur_by_bucket.get(bucket, 0) + cur_v
+        if prior_v is not None:
+            prior_by_bucket[bucket] = prior_by_bucket.get(bucket, 0) + prior_v
+    return {b: (lakhs_to_cr(cur_by_bucket.get(b)), lakhs_to_cr(prior_by_bucket.get(b)))
+            for b in INVESTMENT_PORTFOLIO_BUCKETS if b in cur_by_bucket or b in prior_by_bucket}
+
+
+def extract_average_claim_size(pdf_path):
+    """ACS = Total amount of claims paid / Total no. of claims paid, from
+    NL-39 (Ageing of Claims) - verified against a real filing: NL-39 has a
+    "Health" line-of-business row (this pipeline covers health insurers)
+    with its own grand-total "Total No. of claims paid"/"Total amount of
+    claims paid" columns (the table's last two). Unlike every other form
+    this pipeline reads, NL-39's own header prints only "For the quarter
+    ending..." - no "Up to the quarter"/prior-year phrasing at all - so
+    this is current-quarter-only by nature, not a gap in this function.
+    Returns (acs_cur, None) in Rs. (an average claim size, not a portfolio
+    total, so not converted via lakhs_to_cr)."""
+    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-39")
+    if not fp:
+        return None, None
+    for row in fp.tables[0]:
+        label = " ".join(str(row[1]).split()).strip() if len(row) > 1 and row[1] else ""
+        if label.lower() == "health":
+            count = _nl31_cell_num(row, len(row) - 2)
+            amount_lakhs = _nl31_cell_num(row, len(row) - 1)
+            if count:
+                return round(amount_lakhs * 1e5 / count, 2), None
+            return None, None
+    return None, None
+
+
+def _bs_row(fp, *label_substrings):
+    """NL-3/NL-10 are both "As at <date>"/"As at <date-1yr>" balance-sheet-
+    style forms (2 trailing value columns: current period, prior period),
+    not the "For the quarter/Up to the quarter" cumulative-block layout
+    get_line_item expects elsewhere in this pipeline (its year_frags-based
+    column detection returns (None, None) against this header wording,
+    verified against a real filing) - read by fixed column position
+    instead."""
+    row, _, _ = fp.find_row(*label_substrings)
+    if not row:
+        return None, None
+    return _nl31_cell_num(row, len(row) - 2), _nl31_cell_num(row, len(row) - 1)
+
+
+def extract_cumulative_capital(pdf_path):
+    """Cumulative Capital = Share Capital + Share Application Money Pending
+    Allotment (both on NL-3 itself) + Share Premium (NL-10's "Opening
+    Balance" + "Additions during the period" sub-rows under its own "Share
+    Premium" parent row - taken positionally by row offset, since "Opening
+    Balance"/"Additions during the period" alone each match more than one
+    reserve type in this same schedule, verified against a real filing)."""
+    nl3, _ = get_form_page(pdf_path, r"FORM\s+NL-3-B-BS")
+    if not nl3:
+        return None, None
+    share_capital = _bs_row(nl3, "SHARE CAPITAL")
+    share_app_money = _bs_row(nl3, "SHARE APPLICATION MONEY")
+
+    share_premium_opening = share_premium_additions = (None, None)
+    nl10, _ = get_form_page(pdf_path, r"FORM\s+NL-10")
+    if nl10:
+        table = nl10.tables[0]
+        for ridx, row in enumerate(table):
+            label = " ".join(str(row[1]).split()).strip() if len(row) > 1 and row[1] else ""
+            if label == "Share Premium":
+                if ridx + 1 < len(table):
+                    r1 = table[ridx + 1]
+                    share_premium_opening = (_nl31_cell_num(r1, len(r1) - 2), _nl31_cell_num(r1, len(r1) - 1))
+                if ridx + 2 < len(table):
+                    r2 = table[ridx + 2]
+                    share_premium_additions = (_nl31_cell_num(r2, len(r2) - 2), _nl31_cell_num(r2, len(r2) - 1))
+                break
+
+    def _sum_opt(*vals):
+        present = [v for v in vals if v is not None]
+        return sum(present) if present else None
+
+    share_premium_cur = _sum_opt(share_premium_opening[0], share_premium_additions[0])
+    share_premium_prior = _sum_opt(share_premium_opening[1], share_premium_additions[1])
+
+    def combine(sc, sam, sp):
+        # Share Capital is the mandatory base term (no Cumulative Capital
+        # figure makes sense without it); Share Application Money/Share
+        # Premium degrade to 0 if either can't be located this quarter.
+        return None if sc is None else sc + (sam or 0) + (sp or 0)
+
+    cum_cur = combine(share_capital[0], share_app_money[0], share_premium_cur)
+    cum_prior = combine(share_capital[1], share_app_money[1], share_premium_prior)
+    return lakhs_to_cr(cum_cur), lakhs_to_cr(cum_prior)
 
 
 def apply_income_statement_rows(ws, dry_run=False):
@@ -1209,6 +1459,53 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     pbt_cur, pbt_prior = income.get("pbt", (None, None))
     pat_cur, pat_prior = income.get("pat", (None, None))
 
+    # Slides 19/28/29: Expense/Loss/Combined/EOM Ratios, recomputed from
+    # their own components rather than read off NL-20's own printed ratio
+    # cells (QC review feedback: NL-20's own figures shouldn't be trusted
+    # directly - recalculate using the formula instead).
+    nwp_cur, nwp_prior = income.get("nwp", (None, None))
+    ep_cur, ep_prior = income.get("ep", (None, None))
+    net_commission_cur, net_commission_prior = income.get("net_commission", (None, None))
+    net_incurred_claims_cur, net_incurred_claims_prior = income.get("net_incurred_claims", (None, None))
+    gross_commission_cur, gross_commission_prior = income.get("gross_commission", (None, None))
+    ri_accepted_commission_cur, ri_accepted_commission_prior = income.get("ri_accepted_commission", (None, None))
+    gst_cur, gst_prior = income.get("gst", (None, None))
+    ceo_remuneration_cur, ceo_remuneration_prior = income.get("ceo_remuneration", (None, None))
+
+    def _sum_opt(*vals):
+        # Degrade to whichever addends are present, same "don't blank a
+        # whole total over one missing component" convention used
+        # throughout extract_income_statement's own sum_available().
+        present = [v for v in vals if v is not None]
+        return sum(present) if present else None
+
+    # Expense Ratio = (Net Commission + Operating Expenses) / Net Written Premium
+    expense_ratio_cur = safe_div(_sum_opt(net_commission_cur, opex_alone_cur), nwp_cur)
+    expense_ratio_prior = safe_div(_sum_opt(net_commission_prior, opex_alone_prior), nwp_prior)
+    # Loss Ratio = Net Incurred Claims / Net Earned Premium
+    loss_ratio_cur = safe_div(net_incurred_claims_cur, ep_cur)
+    loss_ratio_prior = safe_div(net_incurred_claims_prior, ep_prior)
+    # Combined Ratio = Expense Ratio + Loss Ratio
+    combined_ratio_cur = (expense_ratio_cur + loss_ratio_cur
+                           if expense_ratio_cur is not None and loss_ratio_cur is not None else None)
+    combined_ratio_prior = (expense_ratio_prior + loss_ratio_prior
+                             if expense_ratio_prior is not None and loss_ratio_prior is not None else None)
+    # EOM Ratio = (Gross Commission + Commission on RI Accepted + Opex - GST - CEO Remuneration) / GWP
+    eom_num_cur = _sum_opt(gross_commission_cur, ri_accepted_commission_cur, opex_alone_cur)
+    eom_num_cur = None if eom_num_cur is None else eom_num_cur - (gst_cur or 0) - (ceo_remuneration_cur or 0)
+    eom_num_prior = _sum_opt(gross_commission_prior, ri_accepted_commission_prior, opex_alone_prior)
+    eom_num_prior = None if eom_num_prior is None else eom_num_prior - (gst_prior or 0) - (ceo_remuneration_prior or 0)
+    eom_ratio_cur = safe_div(eom_num_cur, gwp_cur)
+    eom_ratio_prior = safe_div(eom_num_prior, gwp_prior)
+
+    D[(19, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
+    D[(19, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
+    D[(19, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
+    D[(28, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
+    D[(28, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
+    D[(29, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
+    D[(29, "Expense of Management Ratio", None)] = (eom_ratio_cur, eom_ratio_prior)
+
     # Slide 21: expense ratios to GWP
     manpower_cur, manpower_prior = get("manpower_cost")
     it_cur, it_prior = get("it_spend")
@@ -1232,19 +1529,21 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         D[(22, "Facility rental per office per month", None)] = (
             round(rent_cur * 100 / months / offices_cur, 4), None)
 
-    # Slide 23: Net Worth = Capital + Reserves&Surplus + FV change (SH) - Debit balance in P&L
+    # Slide 23: Net Worth = Share Capital + Reserves&Surplus - Debit balance
+    # in P&L Account (per the authoritative formula sheet - no Fair Value
+    # Change addend; an earlier version added "bs_fair_value_change_sh" here,
+    # which the formula sheet doesn't include).
     cap_cur, cap_prior = get("capital")
     res_cur, res_prior = get("bs_reserves_surplus")
-    fv_cur, fv_prior = get("bs_fair_value_change_sh")
     dr_cur, dr_prior = get("bs_debit_balance_pl")
 
-    def net_worth(cap, res, fv, dr):
+    def net_worth(cap, res, dr):
         if cap is None or res is None:
             return None
-        return round(cap + res + (fv or 0) - (dr or 0), 2)
+        return round(cap + res - (dr or 0), 2)
 
-    nw_cur = net_worth(cap_cur, res_cur, fv_cur, dr_cur)
-    nw_prior = net_worth(cap_prior, res_prior, fv_prior, dr_prior)
+    nw_cur = net_worth(cap_cur, res_cur, dr_cur)
+    nw_prior = net_worth(cap_prior, res_prior, dr_prior)
     # GT wants this row in Rs. Lakhs, not Crores (verified: nw_cur*100
     # matches GT for 5 of 7 companies within 1%; Capital/Reserves are
     # otherwise correctly extracted, this is purely a unit mismatch).
@@ -1252,6 +1551,11 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         round(nw_cur * 100, 2) if nw_cur is not None else None,
         round(nw_prior * 100, 2) if nw_prior is not None else None,
     )
+
+    # Slide 23: Cumulative Capital = Share Capital + Share Application Money
+    # Pending Allotment + Share Premium, read directly off NL-3/NL-10 (see
+    # extract_cumulative_capital) - not computed here.
+    D[(23, "Cumulative Capital", None)] = income.get("cumulative_capital", (None, None))
 
     # Slide 27: Historical Trends duplicate GWP/PBT from Slide 18
     D[(27, "GWP", None)] = (gwp_cur, gwp_prior)
@@ -1269,6 +1573,11 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # Slide 32: Investment Yield, read directly off NL-31's own TOTAL row
     # (see extract_investment_yield) - not computed here.
     D[(32, "Investment Yield", None)] = income.get("investment_yield", (None, None))
+
+    # Slide 24: Investment Portfolio, read directly off NL-31's per-category
+    # rows summed by bucket (see extract_investment_portfolio) - not computed here.
+    for bucket, (cur_v, prior_v) in income.get("investment_portfolio", {}).items():
+        D[(24, bucket, None)] = (cur_v, prior_v)
 
     # Slide 30: reinsurance ratios (current period only - NL-33 has no prior-year column)
     ri_ceded_cur, _ = get("ri_ceded_total")
@@ -1294,28 +1603,62 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
             round(comm_prior * 100, 2) if comm_prior is not None else None,
         )
 
-    # Slide 17: state-wise GDPI as a fraction of company GWP (not the
-    # absolute Rs. Crore figure) - verified exactly against GT. "Others" is
-    # computed as the residual against total GWP rather than relying on
-    # NL-34 having its own explicit "Others" line (it often doesn't).
+    # Extraction (gemini_extract.STATES) asks NL-34 for every state/UT by
+    # name, not just the 7 Slide 17 shows - the rest all feed Slide 16's
+    # zone totals below. raw_others_* is NL-34's own "Others" catch-all
+    # field (whatever the form itself couldn't attribute to a named state),
+    # kept separate from any individual state's value.
     state_abs_cur, state_abs_prior = {}, {}
     for state in gemini_extract.STATES:
         if state == "Others":
             continue
         c, p = get(f"state_{state}")
         state_abs_cur[state], state_abs_prior[state] = c, p
-        D[(17, state, None)] = (safe_div(c, gwp_cur), safe_div(p, gwp_prior))
-    named_cur = [v for v in state_abs_cur.values() if v is not None]
-    named_prior = [v for v in state_abs_prior.values() if v is not None]
-    if gwp_cur is not None and len(named_cur) == len(gemini_extract.STATES) - 1:
-        others_cur = gwp_cur - sum(named_cur)
-    else:
-        others_cur = None
-    if gwp_prior is not None and len(named_prior) == len(gemini_extract.STATES) - 1:
-        others_prior = gwp_prior - sum(named_prior)
-    else:
-        others_prior = None
+    raw_others_cur, raw_others_prior = get("state_Others")
+
+    # Slide 17: state-wise GDPI as a fraction of company GWP (not the
+    # absolute Rs. Crore figure) - verified exactly against GT for its 7
+    # named states. "Others" here sums every OTHER extracted state plus
+    # NL-34's own "Others" field - real data now that every state is
+    # extracted, not a GWP residual (which only ever worked as a stand-in
+    # for that sum).
+    for state in gemini_extract.STATES8_NAMED:
+        D[(17, state, None)] = (safe_div(state_abs_cur.get(state), gwp_cur),
+                                safe_div(state_abs_prior.get(state), gwp_prior))
+
+    other_states = [s for s in state_abs_cur if s not in gemini_extract.STATES8_NAMED]
+
+    def sum_or_none(abs_dict, states, raw_extra):
+        vals = [abs_dict[s] for s in states if abs_dict.get(s) is not None]
+        if not vals and raw_extra is None:
+            return None
+        return sum(vals) + (raw_extra or 0)
+
+    others_cur = sum_or_none(state_abs_cur, other_states, raw_others_cur)
+    others_prior = sum_or_none(state_abs_prior, other_states, raw_others_prior)
     D[(17, "Others", None)] = (safe_div(others_cur, gwp_cur), safe_div(others_prior, gwp_prior))
+
+    # Slide 16: zone-wise GDPI as a fraction of company GWP, summing EVERY
+    # extracted state's absolute value by zone via STATE_TO_ZONE - same
+    # fraction-of-GWP convention as Slide 17.
+    def zone_total(zone, abs_dict):
+        vals = [abs_dict[s] for s, z in STATE_TO_ZONE.items() if z == zone and abs_dict.get(s) is not None]
+        return sum(vals) if vals else None
+
+    for zone in ("North", "South", "East", "West", "Central"):
+        zc, zp = zone_total(zone, state_abs_cur), zone_total(zone, state_abs_prior)
+        D[(16, zone, None)] = (safe_div(zc, gwp_cur), safe_div(zp, gwp_prior))
+
+    # "Others (unclassified)" = any extracted state with no zone in
+    # STATE_TO_ZONE (none today - every named state above has one) + NL-34's
+    # own "Others" field, which by definition can't belong to a zone. Every
+    # named state is already accounted for in a zone above, so this does
+    # NOT reuse Slide 17's "Others" (that would double-count the same
+    # states both there and here).
+    unmapped = [s for s in state_abs_cur if s not in STATE_TO_ZONE]
+    unclass_cur = sum_or_none(state_abs_cur, unmapped, raw_others_cur)
+    unclass_prior = sum_or_none(state_abs_prior, unmapped, raw_others_prior)
+    D[(16, "Others (unclassified)", None)] = (safe_div(unclass_cur, gwp_cur), safe_div(unclass_prior, gwp_prior))
 
     # Slide 12: GDPI by channel (coarser 6-bucket split, company-specific metric1)
     metric1_12 = gemini_extract.SLIDE12_COMPANY_METRIC1.get(company)
@@ -1348,10 +1691,19 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         D[(15, "Average Productivity (per agent)", "Premium/No. of Individual Agents")] = (
             round(prem_ia_cur * 100 / agents_cur, 4), None)
 
-    # Slide 20: Claims Settlement Ratio = Claims Settled / Claims Reported (count based)
+    # Slide 20: Claims Settlement Ratio = Claims Settled during the period /
+    # (Claims O/S at beginning + Claims reported during the period - Claims
+    # O/S at End) - all 4 count fields are on NL-37's own "Total" column
+    # (overall company, every line of business summed). Current period only
+    # - NL-37 has no prior-year comparative column at all.
     settled_cur, _ = get("claims_settled")
     reported_cur, _ = get("claims_reported")
-    D[(20, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, reported_cur), None)
+    os_start_cur, _ = get("claims_os_start")
+    os_end_cur, _ = get("claims_os_end")
+    claims_denom_cur = None
+    if os_start_cur is not None and reported_cur is not None:
+        claims_denom_cur = os_start_cur + reported_cur - (os_end_cur or 0)
+    D[(20, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, claims_denom_cur), None)
 
     # Total policy count = sum of Number of Policies across every NL-36
     # channel (previously only Individual Agents' count was extracted).
@@ -1364,13 +1716,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
             any_policy_count = True
     total_policies_cur = total_policies_cur if any_policy_count else None
 
-    claims_cur, _ = income.get("claims", (None, None))
-    if claims_cur is not None and settled_cur:
-        # Best-effort estimate, not GT-verified: tried against one company
-        # previously and landed ~10% off GT (e.g. NBHI: 27,332 computed vs
-        # GT's 30,582) - whatever exact numerator GT uses for this row isn't
-        # simply "Claims Incurred", but this is a reasonable draft figure.
-        D[(20, "Average Claim Size", None)] = (round(claims_cur * 1e7 / settled_cur, 2), None)
+    # Average Claim Size = Total amount of claims paid / Total no. of claims
+    # paid, read directly off NL-39 (see extract_average_claim_size) -
+    # current-quarter only, since NL-39 itself has no YTD/prior-year column.
+    D[(20, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
     if reported_cur is not None and total_policies_cur:
         D[(20, "No. of claims to No. of policies", None)] = (round(reported_cur / total_policies_cur, 6), None)
 
@@ -1509,7 +1858,18 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         "pbt": inc.get("PBT", (None, None)),
         "pat": inc.get("PAT", (None, None)),
         "investment_yield": inc.get("Investment Yield", (None, None)),
+        "investment_portfolio": inc.get("Investment Portfolio", {}),
         "claims": inc.get("Claims", (None, None)),
+        "nwp": inc.get("Net Written Premium", (None, None)),
+        "ep": inc.get("Earned Premium", (None, None)),
+        "net_commission": inc.get("Net Commission", (None, None)),
+        "net_incurred_claims": inc.get("Net Incurred Claims", (None, None)),
+        "gross_commission": inc.get("Gross Commission", (None, None)),
+        "ri_accepted_commission": inc.get("RI Accepted Commission", (None, None)),
+        "gst": inc.get("GST", (None, None)),
+        "ceo_remuneration": inc.get("CEO Remuneration", (None, None)),
+        "average_claim_size": inc.get("Average Claim Size", (None, None)),
+        "cumulative_capital": inc.get("Cumulative Capital", (None, None)),
     }
 
     idx = build_row_index(ws)

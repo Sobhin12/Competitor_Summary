@@ -29,7 +29,7 @@ from competitor_analysis.extraction import pdf_cache
 from competitor_analysis import config as cfg
 from competitor_analysis.extraction.pdf_cache import COMPANY_PDFS, FORM_PATTERNS
 from competitor_analysis.extraction.schemas import (
-    ExtractedValue, CHANNELS_36, DEBT_RATINGS, MATURITY_BUCKETS, STATES, INTERMEDIARIES,
+    ExtractedValue, CHANNELS_36, DEBT_RATINGS, MATURITY_BUCKETS, STATES, STATES8_NAMED, INTERMEDIARIES,
 )
 from competitor_analysis import paths
 
@@ -159,7 +159,6 @@ def master_metric_specs():
     add("capital", "Share Capital (paid-up equity capital), from the Balance Sheet (NL-3).", ["NL-3"], "money",
         [(23, "Capital", None)])
     add("bs_reserves_surplus", "Reserves and Surplus, from the Balance Sheet (NL-3), 'Sources of Funds' section.", ["NL-3"], "money", [])
-    add("bs_fair_value_change_sh", "Fair Value Change Account - Shareholders' Funds portion, from the Balance Sheet (NL-3), 'Sources of Funds' section.", ["NL-3"], "money", [])
     add("bs_debit_balance_pl", "Debit Balance in Profit and Loss Account (accumulated losses carried on the balance sheet, if any - 0 if not present), from the Balance Sheet (NL-3), 'Application of Funds' section.", ["NL-3"], "money", [])
 
     # --- NL-6 Commission Schedule: channel-wise commission (Lakhs) - combined
@@ -178,17 +177,11 @@ def master_metric_specs():
     add("rent_expense", "Rent, rates & taxes (office rent) expense line item, from the Operating Expenses Schedule (NL-7).",
         ["NL-7"], "money", [])
 
-    # --- NL-12 & 12A Investment Schedule: portfolio breakdown + AUM ---
-    add("inv_govt_bonds", "Sum of Central Government Securities + State Government Securities/Development Loans + Treasury Bills, GRAND TOTAL (Long term + Short term, Shareholders + Policyholders), from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(24, "Govt Bonds", None)])
-    add("inv_corporate_bonds", "Sum of Debentures/Bonds + Approved Investment Infrastructure/Housing/Other securities + Other Approved Securities (corporate debt), GRAND TOTAL, from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(24, "Corporate Bonds/Debentures", None)])
-    add("inv_deposits", "Fixed Deposits / Short-term deposits with banks (deposit investments), GRAND TOTAL, from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(24, "Deposits", None)])
-    add("inv_equity", "Equity Shares (incl. InvITs/REITs if listed separately), GRAND TOTAL, from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(24, "Equity/Invits/REIT", None)])
-    add("inv_mutual_funds", "Mutual Fund / Money Market investments, GRAND TOTAL, from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(24, "Mutual Funds", None)])
+    # --- NL-12 & 12A Investment Schedule: AUM only. Slide 24's asset-class
+    # breakdown (Govt Bonds/Corporate Bonds/Deposits/Equity/Mutual Funds) is
+    # NOT extracted here - it's a deterministic Python rollup of NL-31's own
+    # per-category-code rows (data_engine.extract_investment_portfolio),
+    # since NL-31 already carries an IRDAI-standard category code per row.
     add("aum_total", "GRAND TOTAL of all investments (Shareholders + Policyholders, Long term + Short term) - the bottom-line total of the Investment Schedule (NL-12 & 12A).",
         ["NL-12"], "money", [(32, "AUM (Overall)", None)])
     add("aum_shareholders", "Total investments attributable to the SHAREHOLDERS' fund only (Long term + Short term shareholders columns), from the Investment Schedule (NL-12 & 12A).",
@@ -197,14 +190,14 @@ def master_metric_specs():
         ["NL-12"], "money", [(33, "AUM -Policyholders", None)])
 
     # --- NL-20 Analytical Ratios ---
-    add("combined_ratio", "Combined Ratio (overall company total, not segment-wise), from the Analytical Ratios Schedule (NL-20).",
-        ["NL-20"], "percent", [(19, "Combined Ratio", None), (28, "Combined Ratio", None)])
-    add("loss_ratio", "'Net Incurred Claims to Net Earned Premium' ratio (overall company total), from the Analytical Ratios Schedule (NL-20).",
-        ["NL-20"], "percent", [(19, "Loss Ratio", None), (28, "Loss Ratio", None)])
-    add("expense_ratio_nwp", "'Expense of Management to Net Written Premium' Ratio (overall company total), from the Analytical Ratios Schedule (NL-20).",
-        ["NL-20"], "percent", [(19, "Expense Ratio", None), (29, "Expense Ratio", None)])
-    add("eom_ratio_gdp", "'Expense of Management to Gross Direct Premium' Ratio (overall company total), from the Analytical Ratios Schedule (NL-20).",
-        ["NL-20"], "percent", [(29, "Expense of Management Ratio", None)])
+    # Combined/Loss/Expense/EOM Ratios are NOT extracted from NL-20 anymore -
+    # QC review feedback was to recompute each from its own components
+    # (Net Commission/Opex/NWP/Net Incurred Claims/Net Earned Premium/Gross
+    # Commission/RI Accepted Commission/GST/CEO Remuneration/GWP, all
+    # deterministic pdfplumber reads in data_engine.extract_income_statement)
+    # rather than trust whatever NL-20 itself prints. See
+    # data_engine.compute_derived_metrics's Slide 19/28/29 block. Solvency
+    # Ratio has no component formula given, so it's still read directly.
     add("solvency_ratio", "'Available Solvency Margin Ratio to Required Solvency Margin Ratio' (No. of times), from the Analytical Ratios Schedule (NL-20).",
         ["NL-20"], "ratio", [(31, "Solvency Ratios", None)])
 
@@ -221,9 +214,12 @@ def master_metric_specs():
         ["NL-33"], "money", [])  # used in slide30 ratio
 
     # --- NL-34 Geographical Distribution: state GDPI ---
-    # (NL-34 lists individual states only, no zone/region rollup - Slide 16's
-    # North/East/West/Central/South split isn't directly derivable and is
-    # intentionally left blank rather than guessed at a state->zone mapping.)
+    # NL-34 lists individual states only, no zone/region rollup - Slide 16's
+    # North/East/West/Central/South split is derived in reporting/report.py
+    # via a fixed state->zone table (STATE_TO_ZONE), covering every state/UT
+    # requested below. A state this list doesn't ask for by name still lands
+    # in "Others" (the residual/all-other-states total), which report.py
+    # buckets as "Others (unclassified)" rather than assigning it a zone.
     # rows=[] - Slide 17 wants each state's share of company GWP, not the
     # absolute Rs. Crore figure fetched here; the fraction is computed in
     # compute_derived_metrics (extraction/data_engine.py) instead.
@@ -258,6 +254,8 @@ def master_metric_specs():
     add("claims_reported", "'Claims reported during the period', Total (overall company, rightmost/Total column), from the Claims Data Schedule (NL-37) - a claim COUNT, not an amount.",
         ["NL-37"], "count", [])
     add("claims_settled", "'Claims Settled during the period', Total (overall company, rightmost/Total column), from the Claims Data Schedule (NL-37) - a claim COUNT, not an amount.",
+        ["NL-37"], "count", [])
+    add("claims_os_end", "'Claims O/S at End of the period', Total (overall company, rightmost/Total column), from the Claims Data Schedule (NL-37) - a claim COUNT, not an amount.",
         ["NL-37"], "count", [])
 
     # --- NL-41 Offices Information (point-in-time; no prior-year column expected) ---

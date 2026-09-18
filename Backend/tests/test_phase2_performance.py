@@ -282,12 +282,20 @@ def test_total_call_count_stays_within_a_few_quota_minutes():
     local parallelism - sets the floor on a cold run. Batch size therefore
     wants to be as large as the API accepts; this guards against someone
     shrinking it again for "more parallelism" and quietly multiplying the
-    request count (a batch of 13 would mean 49 calls, over 3 quota-minutes)."""
+    request count (a batch of 13 would mean 49 calls, over 3 quota-minutes).
+
+    The ceiling here is 3 minutes, not 2 - NL-34's state list grew from 7
+    named states to every state/UT (schemas.STATES), which pushed the total
+    metric count past what 20-field batches cover in 2 minutes. That's a
+    deliberate, expected cost of extracting far more geographic detail, not
+    a batch_size regression - DEFAULT_BATCH_SIZE can't just go up to
+    compensate, since the API itself rejects batches much above 20 (see its
+    own comment)."""
     n = len(g.master_metric_specs())
     per_company = -(-n // g.DEFAULT_BATCH_SIZE)
     total = per_company * 7
     floor_minutes = total / max(g.GEMINI_RPM, 1)
-    assert floor_minutes <= 2.0, (
+    assert floor_minutes <= 3.0, (
         f"{total} calls at {g.GEMINI_RPM}/min needs {floor_minutes:.1f} minutes "
         f"of quota; use a larger batch_size")
     assert g.DEFAULT_BATCH_SIZE <= 40

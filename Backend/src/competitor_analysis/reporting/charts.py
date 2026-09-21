@@ -405,7 +405,11 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
     for a pct100 chart with `value_labels` on, the % already printed inside
     each segment makes the axis redundant."""
     n = len(categories)
-    present = [i for i in range(n) if any((v[i] is not None) for v in series_dict.values())]
+    # A category where every series is None/0 (e.g. no SAHI company writes
+    # any Govt.-scheme business) has nothing to show - drop it rather than
+    # rendering an empty bar with a fabricated total.
+    present = [i for i in range(n)
+               if any((v[i] is not None and v[i] != 0) for v in series_dict.values())]
     if not present:
         return False
     cats = [categories[i] for i in present]

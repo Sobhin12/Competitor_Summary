@@ -844,8 +844,10 @@ def slide_20(pdf, rows):
     panels = [
         {"title": "Claims Settlement Ratio", "metric1": "Claims Settlement Ratio", "metric2": None,
          "kind": "percent", "mode": "single"},
-        {"title": "Average Claim Size (Rs.)", "metric1": "Average Claim Size", "metric2": None,
-         "kind": "money", "mode": "single"},
+        # Data Engine cell stays plain Rs. (claims Rs. / claims_settled count) -
+        # "scale" converts only this chart's display to Rs. Lakhs.
+        {"title": "Average Claim Size (Rs. Lakhs)", "metric1": "Average Claim Size", "metric2": None,
+         "kind": "money", "mode": "single", "scale": 1e-5},
         {"title": "No. of Claims to No. of Policies", "metric1": "No. of claims to No. of policies", "metric2": None,
          "kind": "percent", "mode": "single", "higher_is_better": False},
     ]

@@ -627,15 +627,17 @@ def slide_13(pdf, rows):
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}")
+        charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}",
+                          unit_label="Rs. Lakhs")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx],
-                          title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}")
+                          title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}",
+                          unit_label="Rs. Lakhs")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True)
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -882,7 +884,8 @@ def _fractions_of_row_total(series_dict, n):
             for name, v in series_dict.items()}
 
 
-def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, note, normalize=False):
+def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, note, normalize=False,
+                             show_totals=False, unit_label=None):
     cdata = data.pivot_metric1_only(rows, slide_no, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
     if not keys:
@@ -904,14 +907,14 @@ def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, n
     fig, panels, ins = new_page(title, page_no, n_panels, want_insights=True, hspace=0.75, n_insight_lines=1)
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=cfg.cur_period_label())
+        charts.panel_box(fig, panels[idx], title=cfg.cur_period_label(), unit_label=unit_label)
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur, colors, pct100=True)
+        charts.stacked_bar(ax, names, cur, colors, pct100=True, show_totals=show_totals)
         idx += 1
     if has_pri:
-        charts.panel_box(fig, panels[idx], title=cfg.prior_period_label())
+        charts.panel_box(fig, panels[idx], title=cfg.prior_period_label(), unit_label=unit_label)
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri, colors, pct100=True)
+        charts.stacked_bar(ax, names, pri, colors, pct100=True, show_totals=show_totals)
     draw_insights(fig, ins, [note])
     pdf.savefig(fig)
     plt.close(fig)
@@ -919,8 +922,12 @@ def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, n
 
 def slide_24(pdf, rows):
     series_names = ["Corporate Bonds/Debentures", "Govt Bonds", "Deposits", "Equity/Invits/REIT", "Mutual Funds"]
+    # Not normalize=True: these bucket values are already absolute Rs. Crore
+    # (extract_investment_portfolio), so stacked_bar's own pct100 does the
+    # %-mix conversion and show_totals can print the real absolute total.
     two_period_stacked_page(pdf, rows, 24, "Investment Portfolio", 24, series_names,
-                             "Investment mix as % of each company's own book value.", normalize=True)
+                             "Investment mix as % of each company's own book value.",
+                             show_totals=True, unit_label="Rs. Crore")
 
 
 def slide_25(pdf, rows):

@@ -80,7 +80,11 @@ def _footer(fig, page_no):
 
 def _header_footer(fig, title, page_no):
     _left_border(fig)
-    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {cfg.FY}", fontsize=12.5,
+    # Q4 is the full-year close, so the header drops the quarter and just
+    # says the FY - every other quarter keeps "FY.. Qn" since the header is
+    # the only place on the page naming which quarter's cut this is.
+    header_period = cfg.FY if cfg.QUARTER == "Q4" else cfg.cur_period_label()
+    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {header_period}", fontsize=12.5,
               fontweight="bold", color=theme.NAVY)
     fig.add_artist(Line2D([_MARGIN_L, _MARGIN_R], [0.955, 0.955], transform=fig.transFigure, color=theme.BLUE,
                           linewidth=1.5))
@@ -1044,14 +1048,14 @@ def slide_35(pdf, rows):
     n_panels = int(has_off) + int(has_int)
     bullets = leader_laggard_bullets(keys, off_cur, [None] * len(keys), "count", "office count") if has_off else []
     fig, panels, ins = new_page("Distribution Footprint", 35, n_panels, want_insights=bool(bullets),
-                                 n_insight_lines=len(bullets))
+                                 hspace=0.75, n_insight_lines=len(bullets))
     idx = 0
     if has_off:
-        panel_title(fig, panels[idx], "No. of Offices")
+        charts.panel_box(fig, panels[idx], title="No. of Offices")
         charts.single_bar(fig, panels[idx], names, off_cur)
         idx += 1
     if has_int:
-        panel_title(fig, panels[idx], "Intermediaries by type")
+        charts.panel_box(fig, panels[idx], title="Intermediaries by type")
         colors = theme.series_colors_for(INTERMEDIARY_TYPES)
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, series, colors, pct100=False)

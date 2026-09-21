@@ -65,6 +65,10 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
         print(f"[Headers]         already labelled {p.CUR_PERIOD} / {p.PRIOR_PERIOD}.")
 
     # ---- Stage 1: GIC.xlsx-sourced rows (Slides 3-11, 14) ----
+    # `gic` is kept around past this block (not just used here): Stage 2's
+    # extract_income_statement uses it as GWP's authoritative GDPI base
+    # (set_gic_gdpi_lookup below), and Stage 4 uses it for Slide 8.
+    gic = None
     if run_gic:
         t0 = time.time()
         gic = p.GicData()
@@ -76,6 +80,7 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     else:
         print("[GIC.xlsx]        skipped - not found for this period.")
         progress("GIC", 0, "skipped")
+    p.set_gic_gdpi_lookup(p.gic_gdpi_lookup(gic))
 
     if companies is None:
         companies = list(gemini_extract.COMPANY_PDFS.keys())
@@ -150,7 +155,7 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
 
     # ---- Stage 4: Slide 8/12 convention fixes (needs Stage 3's Slide 12 values already written) ----
     t0 = time.time()
-    fix_written, fix_log = p.fix_slide8_and_slide12(ws)
+    fix_written, fix_log = p.fix_slide8_and_slide12(ws, gic)
     t_fix = time.time() - t0
     print(f"[Fix Slide 8/12]  {fix_written} cell-pairs written  -  {t_fix:.1f}s")
 

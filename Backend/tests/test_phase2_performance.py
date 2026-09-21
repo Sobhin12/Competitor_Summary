@@ -810,7 +810,7 @@ def test_a_company_failing_in_the_write_loop_does_not_fail_the_run(monkeypatch):
                         lambda c, **k: {})
     monkeypatch.setattr(p, "apply_income_statement_rows", lambda ws: (0, []))
     monkeypatch.setattr(p, "prefetch_gemini_metrics", lambda c, **k: {})
-    monkeypatch.setattr(p, "fix_slide8_and_slide12", lambda ws: (0, []))
+    monkeypatch.setattr(p, "fix_slide8_and_slide12", lambda ws, gic=None: (0, []))
     monkeypatch.setattr(p, "assert_channel_mix_sums", lambda ws: [])
 
     written_for = []

@@ -71,9 +71,16 @@ def _is_cumulative_header(text):
     phrasing across insurers - e.g. NBHI/Star: 'Up to the quarter ended ...';
     ABHI: 'For The Period Ended ...' (vs. their single-quarter 'For The
     Quarter Ended ...'). Detect generically rather than hardcoding one
-    phrasing."""
+    phrasing.
+
+    "Year ended" is also cumulative, not just "period"/"up to" - Q4's
+    cumulative period IS the full fiscal year, and some insurers (e.g. ABHI)
+    word it "For The Year Ended ..." for that quarter specifically, distinct
+    from their own "For The Quarter Ended ..." (single-quarter, still not
+    cumulative). Verified this doesn't also match the quarter-only phrasing:
+    "quarter ended" never contains the substring "year ended"."""
     low = text.lower()
-    return "up to" in low or "upto" in low or "period ended" in low
+    return "up to" in low or "upto" in low or "period ended" in low or "year ended" in low
 
 
 _PERIOD_PHRASE_RE = re.compile(

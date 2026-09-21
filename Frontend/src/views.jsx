@@ -1,5 +1,5 @@
 import { AppIcon } from "./Icons.jsx";
-import { Card, Button, Spinner, Badge, Checkbox, ProgressBar, CircularProgress, PhaseStepper, CompanyAvatar, ActivityLog, formatElapsed } from "./ui.jsx";
+import { Card, Button, Spinner, Badge, Checkbox, ProgressBar, CircularProgress, PhaseStepper, CompanyAvatar, formatElapsed } from "./ui.jsx";
 
 // ---------------------------------------------------------------------------
 // Shared small pieces
@@ -49,7 +49,7 @@ function phaseTone(status) {
 // Overview
 // ---------------------------------------------------------------------------
 export function OverviewView({ state, onNavigate, onRun, onManual, onToggleCompany, onSelectAll, onSelectNone }) {
-  const { phases, companies, activity, running, elapsed, reportProgress } = state;
+  const { phases, companies, running, elapsed, reportProgress } = state;
   const awaitingReview = state.runStatus === "awaiting_review";
   const awaitingReport = state.runStatus === "awaiting_report";
   // Retrieval is marked "skipped" (rather than "done") only for a run
@@ -123,8 +123,8 @@ export function OverviewView({ state, onNavigate, onRun, onManual, onToggleCompa
         <StatCard icon="fileText" label="Report progress" value={`${reportProgress}%`} tone="emerald" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        <Card className="p-5 lg:col-span-3">
+      <div className="grid grid-cols-1 gap-6">
+        <Card className="p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold text-white">Retrieval &amp; Extraction Snapshot</h3>
             <div className="flex gap-2">
@@ -154,13 +154,6 @@ export function OverviewView({ state, onNavigate, onRun, onManual, onToggleCompa
               );
             })}
           </div>
-        </Card>
-
-        <Card className="p-5 lg:col-span-2 flex flex-col h-[340px]">
-          <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
-            <AppIcon name="database" className="w-4 h-4 text-slate-400" /> Activity Log
-          </h3>
-          <ActivityLog entries={activity} />
         </Card>
       </div>
     </div>

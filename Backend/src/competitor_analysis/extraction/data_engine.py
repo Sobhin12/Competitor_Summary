@@ -31,7 +31,8 @@ import openpyxl
 from competitor_analysis.extraction.forms import (COMPANY_PDFS, get_form_page, get_line_item, get_line_item_any,
                           get_form_text, get_line_item_from_text, sum_rows_after,
                           extract_nl36 as pdf_extract_nl36, NL36_CHANNELS,
-                          RESOLUTION_LOG, year_frags as pdf_extract_year_frags)
+                          RESOLUTION_LOG, year_frags as pdf_extract_year_frags,
+                          _is_cumulative_header, _SNAPSHOT_PHRASE_RE)
 from competitor_analysis.extraction import gemini as gemini_extract
 from competitor_analysis.extraction import schemas
 from competitor_analysis import config as cfg
@@ -214,6 +215,55 @@ SAHI_ROW_LABELS = {
     "Narayana Health Insurance Ltd": "Narayana",
     "Star Health & Allied Insurance Co Ltd": "Star",
 }
+
+# company_short (COMPANY_PDFS/pipeline key) -> GIC.xlsx's own Segmentwise
+# Report row label - same 7 companies as SAHI_ROW_LABELS, just keyed by the
+# pipeline's own company identifier instead of SAHI_ROW_LABELS' short display
+# code (the two naming conventions don't otherwise line up, e.g. "Star
+# Health" here vs "Star" there).
+SLIDE8_GIC_LABEL = {
+    "NBHI": "Niva bupa health insurance company limited",
+    "ABHI": "Aditya Birla Health Insurance Co Ltd",
+    "Care Health": "Care Health Insurance Ltd",
+    "Galaxy Health": "Galaxy Health Insurance Company Ltd",
+    "Manipal Cigna": "ManipalCigna Health Insurance Co Ltd",
+    "Narayana Health": "Narayana Health Insurance Ltd",
+    "Star Health": "Star Health & Allied Insurance Co Ltd",
+}
+
+
+def gic_gdpi_lookup(gic):
+    """{company_short: (cur_cr, prior_cr)} from GIC.xlsx's Segmentwise
+    Report "Grand Total" column - the authoritative per-company GDPI this
+    pipeline now uses everywhere GDPI/GWP is needed (Slide 8's "Revenue
+    Growth (GDPI)" and GWP's base component in extract_income_statement),
+    instead of each company's own self-reported NL-4 "Gross Direct Premium"
+    line. Already in Rs. Crore, NOT Lakhs (verified against a real filing:
+    GIC's Grand Total matches NL-4's own line to the rupee once NL-4's
+    Lakhs figure is converted - GIC.xlsx itself reports in Crore already,
+    unlike every PDF form this pipeline reads)."""
+    if gic is None:
+        return {}
+    seg = gic.segmentwise
+    lookup = {}
+    for company_short, gic_label in SLIDE8_GIC_LABEL.items():
+        cur = get(seg, gic_label, "Grand Total", "cur")
+        prior = get(seg, gic_label, "Grand Total", "prev")
+        if cur is not None or prior is not None:
+            lookup[company_short] = (cur, prior)
+    return lookup
+
+
+# Set once per Phase-2 run (pipeline.py, right after GIC.xlsx is loaded) so
+# extract_income_statement can use it without threading a new parameter
+# through its 3 call sites - 2 of which run concurrently across companies.
+# Same module-level-state convention as config.set_period().
+_GIC_GDPI_LOOKUP = {}
+
+
+def set_gic_gdpi_lookup(lookup):
+    global _GIC_GDPI_LOOKUP
+    _GIC_GDPI_LOOKUP = lookup or {}
 
 
 def read_sheet(ws):
@@ -710,17 +760,20 @@ SLIDE8_COMPANY = {
 SLIDE8_METRIC2 = {"NBHI": "Health + PA + Travel"}
 
 
-def fix_slide8_and_slide12(ws, dry_run=False):
-    """Writes Slide 8's per-company GDPI and Slide 12's channel mix, both
-    sourced from each company's own NL-36.
+def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
+    """Writes Slide 8's per-company GDPI (from GIC.xlsx's Segmentwise
+    Report Grand Total - see gic_gdpi_lookup) and Slide 12's channel mix
+    (still from each company's own NL-36, which GIC doesn't break down by
+    channel).
 
-    Idempotent: every value is derived from the filing, not from whatever the
+    Idempotent: every value is derived from the source, not from whatever the
     cell already held. (An earlier version converted Slide 12's cells in place
     by reading them back as its own input, which meant running it twice
     re-divided an already-converted fraction.)"""
     idx = build_row_index(ws)
     written = 0
     log = []
+    gdpi_lookup = gic_gdpi_lookup(gic)
 
     def write_cell(row, cur, prior):
         nonlocal written
@@ -737,20 +790,17 @@ def fix_slide8_and_slide12(ws, dry_run=False):
         written += 1
 
     for company in SLIDE8_COMPANY:
+        gt_cur, gt_prior = gdpi_lookup.get(company, (None, None))
+        if gt_cur is not None or gt_prior is not None:
+            written += apply_metric_to_rows(
+                ws, idx, 8, SLIDE8_COMPANY[company], "Revenue Growth (GDPI)",
+                SLIDE8_METRIC2.get(company), gt_cur, gt_prior,
+                dry_run, log,
+            )
+
         nl36 = nl36_for(company)
         if nl36 is None:
             continue
-
-        # Slide 8 uses NL-36's "Grand Total (A+B)" - the company's whole book
-        # including the "Business outside India (B)" line - so the row means
-        # the same thing for every insurer. (Most filings report B as nil, in
-        # which case Grand Total and Total (A) coincide.)
-        gt_cur, gt_prior = nl36["grand_total"]
-        written += apply_metric_to_rows(
-            ws, idx, 8, SLIDE8_COMPANY[company], "Revenue Growth (GDPI)",
-            SLIDE8_METRIC2.get(company), lakhs_to_cr(gt_cur), lakhs_to_cr(gt_prior),
-            dry_run, log,
-        )
 
         # Slide 12 divides by "Total (A)" instead, NOT by the Grand Total:
         # the per-channel rows on NL-36 add up to Total (A) by construction,
@@ -862,7 +912,25 @@ def extract_income_statement(company_short, pdf_path):
         # figure with no base premium at all).
         return None if a is None else a + (b or 0)
 
-    gwp = (_add(gdp[0], ri_accepted[0]), _add(gdp[1], ri_accepted[1]))
+    # GDPI (GWP's base component) is authoritatively GIC.xlsx's per-company
+    # Grand Total (Segmentwise Report), not this company's own NL-4 line -
+    # verified to match NL-4 to the rupee when both are present, so GIC is
+    # simply the more authoritative source for the same figure. GIC's Grand
+    # Total is already Rs. Crore (not Lakhs like every PDF form here), so
+    # it's converted to a Lakhs-equivalent to combine with ri_accepted
+    # before this function's one lakhs_to_cr pass at the end. Falls back to
+    # this company's own NL-4 "Gross Direct Premium" line only when GIC.xlsx
+    # wasn't available at all for this run (e.g. not yet on disk for the
+    # target quarter) - not a silent guess, since GT confirms it's the same
+    # number either way.
+    gic_gdpi = _GIC_GDPI_LOOKUP.get(company_short)
+    gic_cur_cr, gic_prior_cr = gic_gdpi if gic_gdpi is not None else (None, None)
+    gdp_final = (
+        gic_cur_cr * 100 if gic_cur_cr is not None else gdp[0],
+        gic_prior_cr * 100 if gic_prior_cr is not None else gdp[1],
+    )
+
+    gwp = (_add(gdp_final[0], ri_accepted[0]), _add(gdp_final[1], ri_accepted[1]))
     out["Gross Written Premium"] = tuple(lakhs_to_cr(v) for v in gwp)
     out["Net Written Premium"] = tuple(lakhs_to_cr(v) for v in nwp)
     out["Earned Premium"] = tuple(lakhs_to_cr(v) for v in ep)
@@ -920,15 +988,18 @@ def extract_income_statement(company_short, pdf_path):
     out["RI Accepted Commission"] = tuple(lakhs_to_cr(v) for v in ri_accepted_commission)
 
     # GST is only on NL-7 (item 16, "Goods and Services Tax (GST)") - needed
-    # for the EOM Ratio formula, which excludes it from Opex.
+    # for the EOM Ratio formula, which excludes it from Opex. "Goods and
+    # Service" (singular, no trailing s on "Service") matches both that
+    # wording and ABHI's own "Goods and Service Tax" - confirmed against a
+    # real filing that the plural "Services" version misses ABHI entirely.
     nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7")
     nl7_text = None
     if nl7 is None:
         nl7_text, _ = get_form_text(pdf_path, r"FORM\s+NL-7")
     if nl7:
-        gst = get_line_item(nl7, "Goods and Services Tax")
+        gst = get_line_item(nl7, "Goods and Service")
     elif nl7_text:
-        gst = get_line_item_from_text(nl7_text, "Goods and Services Tax", form="NL-7")
+        gst = get_line_item_from_text(nl7_text, "Goods and Service", form="NL-7")
     else:
         gst = (None, None)
     out["GST"] = tuple(lakhs_to_cr(v) for v in gst)
@@ -1077,7 +1148,11 @@ def _nl31_table_and_blocks(pdf_path):
             if not cell:
                 continue
             text = " ".join(str(cell).split()).lower()
-            if "year to date" not in text and "period ended" not in text:
+            # Reuses forms._is_cumulative_header's generic phrase check
+            # (was a narrower hand-rolled "year to date"/"period ended"
+            # check that missed ABHI's "Upto the Year Ended ..." wording -
+            # confirmed against a real filing).
+            if "year to date" not in text and not _is_cumulative_header(text):
                 continue
             # "previous"/"corresponding" phrasing, or the prior year
             # itself printed in the header. The year comes from the
@@ -1191,9 +1266,27 @@ def extract_investment_portfolio(pdf_path):
     table, cur_start, prior_start = _nl31_table_and_blocks(pdf_path)
     if table is None:
         return {}
+
+    # The Category Code column's position varies by insurer (Niva Bupa:
+    # index 2; ABHI: index 3, since ABHI's table has an extra leading blank
+    # column shifting everything right) - located dynamically by its own
+    # header text, same technique as cur_start/prior_start above, rather
+    # than assumed by a fixed position (verified against a real filing:
+    # the fixed-position version silently returned nothing at all for ABHI).
+    code_col = None
+    for row in table[:8]:
+        for i, cell in enumerate(row):
+            if cell and "category code" in " ".join(str(cell).split()).lower():
+                code_col = i
+                break
+        if code_col is not None:
+            break
+    if code_col is None:
+        return {}
+
     cur_by_bucket, prior_by_bucket = {}, {}
     for row in table:
-        code = row[2] if len(row) > 2 and row[2] else None
+        code = row[code_col] if code_col < len(row) and row[code_col] else None
         if not code:
             continue
         code = " ".join(str(code).split()).strip().upper()
@@ -1216,38 +1309,109 @@ def extract_average_claim_size(pdf_path):
     NL-39 (Ageing of Claims) - verified against a real filing: NL-39 has a
     "Health" line-of-business row (this pipeline covers health insurers)
     with its own grand-total "Total No. of claims paid"/"Total amount of
-    claims paid" columns (the table's last two). Unlike every other form
-    this pipeline reads, NL-39's own header prints only "For the quarter
-    ending..." - no "Up to the quarter"/prior-year phrasing at all - so
-    this is current-quarter-only by nature, not a gap in this function.
+    claims paid" columns, located by their own header text since their
+    position (like every column/row position on this form) varies by
+    insurer - see the two shift-related comments below.
+
+    Some insurers' NL-39 (e.g. Niva Bupa's Q1 filing) prints only a single,
+    quarter-only block with no cumulative phrasing at all - genuinely no
+    YTD column to prefer. Others (e.g. ABHI's Q4 filing) repeat the WHOLE
+    Line-of-Business block twice as separate ROW groups, not a column
+    block like every other form here: "FOR THE QUARTER ENDED ..." then a
+    second "FOR THE YEAR ENDED ..." block further down the same table -
+    the cumulative block is preferred when one exists, matching this
+    pipeline's YTD convention everywhere else.
+
     Returns (acs_cur, None) in Rs. (an average claim size, not a portfolio
-    total, so not converted via lakhs_to_cr)."""
+    total, so not converted via lakhs_to_cr) - current period only, since
+    even the cumulative block found has no prior-year comparative on this
+    form."""
     fp, _ = get_form_page(pdf_path, r"FORM\s+NL-39")
     if not fp:
         return None, None
-    for row in fp.tables[0]:
-        label = " ".join(str(row[1]).split()).strip() if len(row) > 1 and row[1] else ""
-        if label.lower() == "health":
-            count = _nl31_cell_num(row, len(row) - 2)
-            amount_lakhs = _nl31_cell_num(row, len(row) - 1)
+    table = fp.tables[0]
+
+    count_col = amount_col = None
+    for row in table[:8]:
+        for i, cell in enumerate(row):
+            if not cell:
+                continue
+            text = " ".join(str(cell).split()).lower()
+            if "total no" in text and "claims paid" in text:
+                count_col = i
+            elif "total amount" in text and "claims paid" in text:
+                amount_col = i
+    if count_col is None or amount_col is None:
+        return None, None
+
+    cumulative_start = None
+    for i, row in enumerate(table):
+        cell = next((c for c in row if c), None)
+        if cell and _is_cumulative_header(" ".join(str(cell).split())):
+            cumulative_start = i
+            break
+    rows = table[cumulative_start:] if cumulative_start is not None else table
+
+    for row in rows:
+        # "Line of Business"'s own column position varies by insurer (Niva
+        # Bupa: index 1; ABHI: index 2, since ABHI's table has an extra
+        # leading blank column shifting everything right, same issue as
+        # extract_investment_portfolio's Category Code column) - so match
+        # "Health" against any cell in the row instead of a fixed position.
+        is_health_row = any(cell and " ".join(str(cell).split()).strip().lower() == "health" for cell in row)
+        if is_health_row:
+            count = _nl31_cell_num(row, count_col)
+            amount_lakhs = _nl31_cell_num(row, amount_col)
             if count:
                 return round(amount_lakhs * 1e5 / count, 2), None
             return None, None
     return None, None
 
 
+def _snapshot_cols(fp):
+    """(cur_col, prior_col), or (None, None) if not found: the current/prior
+    column indices of an "As at <date>"/"As at <date-1yr>" balance-sheet-
+    style table (NL-3, NL-10), located dynamically from that header text
+    (via _SNAPSHOT_PHRASE_RE + the configured year fragments) rather than
+    assumed to be a row's last two columns - some insurers' tables (e.g.
+    ABHI's NL-3/NL-10) have a genuine trailing blank column after the real
+    data, which "last two columns" silently misreads as the prior-period
+    value instead (confirmed against a real filing: Share Capital's
+    prior-year value came back None because of this)."""
+    table = fp.tables[0]
+    cur_col = prior_col = None
+    cur_frag, prior_frag = pdf_extract_year_frags()
+    for row in table[:5]:
+        for i, cell in enumerate(row):
+            if not cell:
+                continue
+            text = " ".join(str(cell).split())
+            if not _SNAPSHOT_PHRASE_RE.search(text):
+                continue
+            if any(f.lstrip("-") in text for f in cur_frag):
+                cur_col = i
+            elif any(f.lstrip("-") in text for f in prior_frag):
+                prior_col = i
+    return cur_col, prior_col
+
+
 def _bs_row(fp, *label_substrings):
     """NL-3/NL-10 are both "As at <date>"/"As at <date-1yr>" balance-sheet-
-    style forms (2 trailing value columns: current period, prior period),
-    not the "For the quarter/Up to the quarter" cumulative-block layout
-    get_line_item expects elsewhere in this pipeline (its year_frags-based
-    column detection returns (None, None) against this header wording,
-    verified against a real filing) - read by fixed column position
-    instead."""
+    style forms, not the "For the quarter/Up to the quarter" cumulative-
+    block layout get_line_item expects elsewhere in this pipeline (its
+    year_frags-based column detection returns (None, None) against this
+    header wording, verified against a real filing). See _snapshot_cols
+    for how the current/prior columns are located."""
     row, _, _ = fp.find_row(*label_substrings)
     if not row:
         return None, None
-    return _nl31_cell_num(row, len(row) - 2), _nl31_cell_num(row, len(row) - 1)
+    cur_col, prior_col = _snapshot_cols(fp)
+    if cur_col is None or prior_col is None:
+        # Fall back to the previous "last two columns" behavior if the "As
+        # at" header couldn't be matched at all (safer than returning
+        # nothing outright).
+        return _nl31_cell_num(row, len(row) - 2), _nl31_cell_num(row, len(row) - 1)
+    return _nl31_cell_num(row, cur_col), _nl31_cell_num(row, prior_col)
 
 
 def extract_cumulative_capital(pdf_path):
@@ -1267,15 +1431,22 @@ def extract_cumulative_capital(pdf_path):
     nl10, _ = get_form_page(pdf_path, r"FORM\s+NL-10")
     if nl10:
         table = nl10.tables[0]
+        cur_col, prior_col = _snapshot_cols(nl10)
         for ridx, row in enumerate(table):
-            label = " ".join(str(row[1]).split()).strip() if len(row) > 1 and row[1] else ""
-            if label == "Share Premium":
-                if ridx + 1 < len(table):
+            # "Share Premium" itself is a parent row (own values blank) -
+            # its label's column position varies by insurer (Niva Bupa:
+            # index 1; ABHI: index 2, same leading-column-shift issue as
+            # elsewhere in this file), so match against any cell rather
+            # than a fixed position.
+            is_share_premium_row = any(
+                cell and " ".join(str(cell).split()).strip() == "Share Premium" for cell in row)
+            if is_share_premium_row:
+                if cur_col is not None and prior_col is not None and ridx + 1 < len(table):
                     r1 = table[ridx + 1]
-                    share_premium_opening = (_nl31_cell_num(r1, len(r1) - 2), _nl31_cell_num(r1, len(r1) - 1))
-                if ridx + 2 < len(table):
+                    share_premium_opening = (_nl31_cell_num(r1, cur_col), _nl31_cell_num(r1, prior_col))
+                if cur_col is not None and prior_col is not None and ridx + 2 < len(table):
                     r2 = table[ridx + 2]
-                    share_premium_additions = (_nl31_cell_num(r2, len(r2) - 2), _nl31_cell_num(r2, len(r2) - 1))
+                    share_premium_additions = (_nl31_cell_num(r2, cur_col), _nl31_cell_num(r2, prior_col))
                 break
 
     def _sum_opt(*vals):
@@ -1964,7 +2135,7 @@ def main():
         lookups = build_gic_lookups(gic)
         updated, skipped = apply_gic_rows(ws, lookups, dry_run=args.dry_run, force=True)
         print(f"GIC re-derive pass (forced): matched {updated} rows, {len(skipped)} unmatched.")
-        written, log = fix_slide8_and_slide12(ws, dry_run=args.dry_run)
+        written, log = fix_slide8_and_slide12(ws, gic, dry_run=args.dry_run)
         print(f"Slide 8/12 fix pass: wrote {written} cell-pairs, {len(log)} unmatched sheet targets.")
         if log:
             for item in log[:20]:

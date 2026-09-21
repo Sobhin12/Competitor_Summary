@@ -201,7 +201,9 @@ def master_metric_specs():
     # rather than trust whatever NL-20 itself prints. See
     # data_engine.compute_derived_metrics's Slide 19/28/29 block. Solvency
     # Ratio has no component formula given, so it's still read directly.
-    add("solvency_ratio", "'Available Solvency Margin Ratio to Required Solvency Margin Ratio' (No. of times), from the Analytical Ratios Schedule (NL-20).",
+    add("solvency_ratio", "'Available Solvency Margin Ratio to Required Solvency Margin Ratio' (No. of times), from the Analytical Ratios Schedule (NL-20). "
+        "Report it as a plain multiple (e.g. 1.84), never a percentage - most insurers print it as a bare number already, but if this schedule prints it "
+        "suffixed with '%' (e.g. '184%'), divide by 100 before reporting (184% -> 1.84).",
         ["NL-20"], "ratio", [(31, "Solvency Ratios", None)])
 
     # --- NL-29 Debt Securities: rating & maturity mix (use Book Value % of total) ---

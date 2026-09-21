@@ -76,10 +76,11 @@ def _outlier_break(values, ratio_threshold=5):
     return max(bottom), max(top)
 
 
-def _style_bar_axes(ax, is_percent):
-    ax.tick_params(axis="y", labelsize=7)
-    if is_percent:
-        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+def _style_bar_axes(ax):
+    # No y-axis - report-wide style choice (bar labels already carry every
+    # value, so ticks/spine would be redundant).
+    ax.tick_params(axis="y", left=False, labelleft=False)
+    ax.spines["left"].set_visible(False)
     ax.spines[["top", "right"]].set_visible(False)
 
 
@@ -94,11 +95,11 @@ def _make_broken_axes(fig, subplot_spec, top_ratio=0.32):
     return ax_top, ax_bot
 
 
-def _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=0.0):
+def _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=0.0):
     ax_bot.set_ylim(lo, bottom_max * 1.28)
     ax_top.set_ylim(bottom_max * 1.28, top_max * 1.15)
     for ax in (ax_top, ax_bot):
-        _style_bar_axes(ax, is_percent)
+        _style_bar_axes(ax)
     ax_top.spines["bottom"].set_visible(False)
     ax_bot.spines["top"].set_visible(False)
     ax_top.tick_params(bottom=False, labelbottom=False)
@@ -314,7 +315,7 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
             ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=6.5, padding=1)
         _add_headroom(ax, pri + cur)
         ax.set_xticklabels(cats, fontsize=8)
-        _style_bar_axes(ax, is_percent)
+        _style_bar_axes(ax)
         ax.legend(fontsize=7, frameon=False, loc="upper right")
         return True
 
@@ -343,7 +344,7 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
     ax_bot.bar_label(b1b, labels=[fmt(v) if v <= bottom_max else "" for v in pri], fontsize=6.5, padding=1)
     ax_bot.bar_label(b2b, labels=[fmt(v) if v <= bottom_max else "" for v in cur], fontsize=6.5, padding=1)
     lo = min(0, min(pri + cur))
-    _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=lo)
+    _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=lo)
     ax_bot.set_xticks(x)
     ax_bot.set_xticklabels(cats, fontsize=8)
     # The outlier company/companies (tall bars) are typically on the right
@@ -370,7 +371,7 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
         ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=7, padding=1)
         _add_headroom(ax, vals)
         ax.tick_params(axis="x", labelsize=8)
-        _style_bar_axes(ax, is_percent)
+        _style_bar_axes(ax)
         return True
 
     bottom_max, top_max = brk
@@ -385,13 +386,13 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
     ax_top.bar_label(bars_top, labels=[fmt(v) if v > bottom_max else "" for v in vals], fontsize=7, padding=1)
     ax_bot.bar_label(bars_bot, labels=[fmt(v) if v <= bottom_max else "" for v in vals], fontsize=7, padding=1)
     lo = min(0, min(vals))
-    _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, is_percent, lo=lo)
+    _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=lo)
     ax_bot.tick_params(axis="x", labelsize=8)
     return True
 
 
 def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=True, show_totals=False,
-                 show_yaxis=True):
+                 show_yaxis=False):
     """series_dict: {series_name: [value_per_category, ...]}.
 
     `show_totals`, if set, annotates each bar's own absolute total (the

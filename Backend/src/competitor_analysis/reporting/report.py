@@ -1077,7 +1077,7 @@ def build(out_path=None, data_engine_path=None):
     paths.ensure_parent(out_path)
     with PdfPages(out_path) as pdf:
         cover_page(pdf)
-        toc_page(pdf, 1)
+        toc_page(pdf, 2)
         for fn in SECTION_FUNCS:
             fn(pdf, rows)
         glossary_page(pdf, 36)

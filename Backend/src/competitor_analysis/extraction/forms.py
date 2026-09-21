@@ -274,11 +274,28 @@ def _extend_to_total_column(table, anchor_row_idx, anchor_col_idx):
     by where the next block starts (found by locating the anchor's own group
     label - e.g. 'Miscellaneous' or 'Health' - and finding where that same
     label repeats, which marks the next block's start). No-op if the anchor
-    already IS the right column (every column individually period-labeled)."""
+    already IS the right column (every column individually period-labeled).
+
+    The group-label row (Health/PA/Travel/Total) can sit either just ABOVE
+    the period-header row (most insurers, e.g. ABHI) or just BELOW it (e.g.
+    CARE, whose NL-4 prints the period header on row 0 and the group labels
+    on row 1) - a fixed "look only at rows up to and including the anchor"
+    search silently missed the label entirely for the below case, degrading
+    to the anchor's own leftmost column (Health) instead of Total. Search a
+    small window of rows in both directions instead of assuming one order -
+    confirmed against a real filing (CARE) that this was the actual cause
+    of Net Written Premium/Earned Premium/Gross Direct Premium all reading
+    the Health column instead of Total."""
     if anchor_row_idx is None or anchor_col_idx is None:
         return anchor_col_idx
+    window = 3
+    lo = max(0, anchor_row_idx - window)
+    hi = min(len(table), anchor_row_idx + window + 1)
+
     anchor_label = None
-    for row in table[max(0, anchor_row_idx - 1)::-1]:
+    search_order = list(range(anchor_row_idx, lo - 1, -1)) + list(range(anchor_row_idx + 1, hi))
+    for ridx in search_order:
+        row = table[ridx]
         if anchor_col_idx < len(row) and row[anchor_col_idx]:
             text = " ".join(str(row[anchor_col_idx]).split())
             low = text.lower()
@@ -287,14 +304,14 @@ def _extend_to_total_column(table, anchor_row_idx, anchor_col_idx):
                 break
     upper_bound = None
     if anchor_label:
-        for row in table[: anchor_row_idx + 1]:
+        for row in table[lo:hi]:
             for i, cell in enumerate(row):
                 if i <= anchor_col_idx or not cell:
                     continue
                 if " ".join(str(cell).split()) == anchor_label:
                     upper_bound = i if upper_bound is None else min(upper_bound, i)
     best = anchor_col_idx
-    for row in table[: anchor_row_idx + 1]:
+    for row in table[lo:hi]:
         for i, cell in enumerate(row):
             if i < anchor_col_idx or not cell:
                 continue

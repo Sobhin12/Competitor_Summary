@@ -103,13 +103,6 @@ def _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=0.0):
     ax_top.spines["bottom"].set_visible(False)
     ax_bot.spines["top"].set_visible(False)
     ax_top.tick_params(bottom=False, labelbottom=False)
-    d = 0.012
-    kwargs = dict(transform=ax_top.transAxes, color="black", clip_on=False, linewidth=0.9)
-    ax_top.plot((-d, d), (-2 * d, 2 * d), **kwargs)
-    ax_top.plot((1 - d, 1 + d), (-2 * d, 2 * d), **kwargs)
-    kwargs["transform"] = ax_bot.transAxes
-    ax_bot.plot((-d, d), (1 - d, 1 + d), **kwargs)
-    ax_bot.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)
 
 
 def panel_box(fig, subplot_spec, title=None, unit_label=None, pad_x=0.014, pad_bottom=0.06, pad_top=0.045):

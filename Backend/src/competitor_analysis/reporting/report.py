@@ -659,9 +659,9 @@ def metric_panels_page(pdf, rows, slide_no, title, page_no, panels_def, footnote
     # are actually here, not a fixed 4-line guess.
     ins_bullets = (bullets[:3] + [footnote]) if footnote else bullets[:4]
     fig, panels, ins = new_page(title, page_no, len(resolved), want_insights=bool(ins_bullets),
-                                 n_insight_lines=len(ins_bullets))
+                                 hspace=0.55, n_insight_lines=len(ins_bullets))
     for (pdef, keys, prior, current), spec in zip(resolved, panels):
-        panel_title(fig, spec, pdef["title"])
+        charts.panel_box(fig, spec, title=pdef["title"])
         is_pct = pdef["kind"] == "percent"
         if pdef.get("mode", "grouped") == "single":
             charts.single_bar(fig, spec, disp_names(keys), current, is_percent=is_pct)

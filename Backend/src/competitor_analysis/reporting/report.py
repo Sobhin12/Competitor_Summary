@@ -278,7 +278,7 @@ def industry_share_page(pdf, rows, title, page_no, slide_no, company_key, own_la
         mix_colors_resolved = [mix_colors.get(g, theme.ORANGE) for g in mix_present]
     else:
         mix_present = [m for m in mix_labels if by_m2.get(m, (None, None))[0]]
-        mix_disp = mix_present
+        mix_disp = [SEG5_DISPLAY.get(m, m) for m in mix_present]
         mix_cur = [by_m2[m][0] for m in mix_present]
         mix_pri = [by_m2[m][1] for m in mix_present]
         mix_colors_resolved = theme.FALLBACK_SERIES_COLORS[:len(mix_disp)]

@@ -150,7 +150,7 @@ def _indian_grouping(n):
 
 
 def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, labels, prior_values,
-                   current_values, colors, group_label=None, unit_label=None, value_fmt=None):
+                   current_values, colors, group_label=None, unit_label=None, value_fmt=None, title=None):
     """Two side-by-side doughnuts (prior/current), reference-deck style: each
     slice's share is called out just outside the ring (name + %), its
     absolute value sits inside the ring in bold white, and the ring's own
@@ -262,20 +262,23 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
                     fontweight="bold", color=color)
 
     bbox = subplot_spec.get_position(fig)
-    pad_x, pad_bottom = 0.014, 0.018
+    pad_x, pad_bottom, pad_top = 0.014, 0.018, 0.045
     box = FancyBboxPatch((bbox.x0 - pad_x, bbox.y0 - pad_bottom),
-                          (bbox.x1 - bbox.x0) + 2 * pad_x, (bbox.y1 - bbox.y0) + pad_bottom,
+                          (bbox.x1 - bbox.x0) + 2 * pad_x, (bbox.y1 - bbox.y0) + pad_bottom + pad_top,
                           transform=fig.transFigure, boxstyle="round,pad=0,rounding_size=0.012",
                           linewidth=1, edgecolor=theme.INSIGHT_BORDER, facecolor="none",
                           linestyle=(0, (5, 3)), clip_on=False)
     fig.add_artist(box)
+    # Title + unit_label share one row inside the box's reserved top strip
+    # (mirrors panel_box's layout) rather than sitting above the box, which
+    # otherwise clips into whatever's drawn just above this panel.
+    row_y = bbox.y1 + pad_top / 2
+    if title:
+        fig.text((bbox.x0 + bbox.x1) / 2, row_y, title, fontsize=11, fontweight="bold", color=theme.DARK_TEXT,
+                  ha="center", va="center", transform=fig.transFigure)
     if unit_label:
-        # Above the box, level with panel_title (report.py draws that at
-        # bbox.y1 + 0.002) rather than tucked inside the top-right corner -
-        # inside collides with whichever wedge's outside label lands near
-        # 12 o'clock, which a bigger ring makes more likely, not less.
-        fig.text(bbox.x1, bbox.y1 + 0.002, unit_label, fontsize=7.5, style="italic",
-                  color=theme.GREY_TEXT, ha="right", transform=fig.transFigure)
+        fig.text(bbox.x1 - pad_x - 0.004, row_y, unit_label, fontsize=7.5, style="italic",
+                  color=theme.GREY_TEXT, ha="right", va="center", transform=fig.transFigure)
     return True
 
 

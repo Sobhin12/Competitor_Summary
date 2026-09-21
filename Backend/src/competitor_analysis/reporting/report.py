@@ -80,7 +80,7 @@ def _footer(fig, page_no):
 
 def _header_footer(fig, title, page_no):
     _left_border(fig)
-    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {cfg.cur_period_label()}", fontsize=12.5,
+    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {cfg.FY}", fontsize=12.5,
               fontweight="bold", color=theme.NAVY)
     fig.add_artist(Line2D([_MARGIN_L, _MARGIN_R], [0.955, 0.955], transform=fig.transFigure, color=theme.BLUE,
                           linewidth=1.5))
@@ -103,7 +103,7 @@ def new_page(title, page_no, n_panels, height_ratios=None, want_insights=False, 
     if want_insights:
         n = 4 if n_insight_lines is None else max(1, min(n_insight_lines, 4))
         ratios = ratios + [0.10 + 0.055 * n]
-    gs = fig.add_gridspec(total_rows, 1, left=0.09, right=0.94, top=0.88, bottom=0.09, hspace=hspace,
+    gs = fig.add_gridspec(total_rows, 1, left=0.09, right=0.94, top=0.85, bottom=0.09, hspace=hspace,
                            height_ratios=ratios)
     panel_specs = [gs[i] for i in range(n_panels)]
     insight_spec = gs[n_panels] if want_insights else None
@@ -288,14 +288,14 @@ def industry_share_page(pdf, rows, title, page_no, slide_no, company_key, own_la
     fig, panels, ins = new_page(title, page_no, n_panels, want_insights=bool(bullets), n_insight_lines=len(bullets))
     idx = 0
     if has_own:
-        panel_title(fig, panels[idx], "Market Share")
         charts.doughnut_pair(fig, panels[idx], cfg.prior_period_label(), cfg.cur_period_label(), own_labels, own_pri,
-                              own_cur, own_colors, group_label=group_label, unit_label="INR Crores")
+                              own_cur, own_colors, group_label=group_label, unit_label="INR Crores",
+                              title="Market Share")
         idx += 1
     if has_mix:
-        panel_title(fig, panels[idx], "Segment Mix")
         charts.doughnut_pair(fig, panels[idx], cfg.prior_period_label(), cfg.cur_period_label(), mix_disp, mix_pri,
-                              mix_cur, mix_colors_resolved, group_label=group_label, unit_label="INR Crores")
+                              mix_cur, mix_colors_resolved, group_label=group_label, unit_label="INR Crores",
+                              title="Segment Mix")
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -341,9 +341,8 @@ def slide_05(pdf, rows):
     n_panels = 1 + int(has_change)
     fig, panels, ins = new_page("SAHI Market", 5, n_panels, height_ratios=[1.3, 1][:n_panels],
                                  want_insights=bool(bullets), n_insight_lines=len(bullets))
-    panel_title(fig, panels[0], "Market Share")
     charts.doughnut_pair(fig, panels[0], cfg.prior_period_label(), cfg.cur_period_label(), names, pri, cur, colors,
-                          group_label="SAHI Market", unit_label="INR Crores")
+                          group_label="SAHI Market", unit_label="INR Crores", title="Market Share")
     if has_change:
         panel_title(fig, panels[1], "Market Share Change (pp)")
         ax = fig.add_subplot(panels[1])
@@ -384,7 +383,7 @@ def slide_06(pdf, rows):
                "SAHI's mix skews more heavily to Health-Retail than Private/Public GI.",
                "Bars show each segment's own mix (%); the number above a bar is its total GDPI."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Segment-wise: Health & PA", 6, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Segment-wise: Health & PA", 6, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -419,7 +418,7 @@ def slide_07(pdf, rows):
     bullets = ["Retail remains the dominant segment across most SAHI players.",
                "Bars show each segment's own mix (%) across SAHI companies; the number above a bar is its total GDPI."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Segment wise SAHI's share", 7, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Segment wise SAHI's share", 7, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -504,7 +503,7 @@ def slide_10(pdf, rows):
     bullets = ["Segment mix (Retail/Group/Govt./Travel/PA) as a share of each group's own GDPI.",
                "SAHI's mix skews more heavily to Retail than Industry/Pvt. GI/Public GI."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Segment-wise GDPI: Health", 10, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Segment-wise GDPI: Health", 10, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -540,7 +539,7 @@ def slide_11(pdf, rows):
 
     bullets = ["Segment mix (% of own GDPI) per SAHI company."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("", 11, n_panels, want_insights=True, hspace=0.55, n_insight_lines=len(bullets))
+    fig, panels, ins = new_page("", 11, n_panels, want_insights=True, hspace=0.75, n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix - SAHI's ({cfg.cur_period_label()})")
@@ -580,7 +579,7 @@ def slide_12(pdf, rows):
 
     bullets = ["Channel mix as % of each SAHI company's own GDPI."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("GDPI by Channel: SAHI's", 12, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("GDPI by Channel: SAHI's", 12, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -620,7 +619,7 @@ def slide_13(pdf, rows):
     bullets = ["Individual Agents remain the largest commission channel for most companies.",
                "Channel mix as % of each company's own total gross commission."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Channel-wise Commission: SAHI's", 13, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Channel-wise Commission: SAHI's", 13, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -659,7 +658,7 @@ def metric_panels_page(pdf, rows, slide_no, title, page_no, panels_def, footnote
     # are actually here, not a fixed 4-line guess.
     ins_bullets = (bullets[:3] + [footnote]) if footnote else bullets[:4]
     fig, panels, ins = new_page(title, page_no, len(resolved), want_insights=bool(ins_bullets),
-                                 hspace=0.55, n_insight_lines=len(ins_bullets))
+                                 hspace=0.75, n_insight_lines=len(ins_bullets))
     for (pdef, keys, prior, current), spec in zip(resolved, panels):
         charts.panel_box(fig, spec, title=pdef["title"])
         is_pct = pdef["kind"] == "percent"
@@ -730,7 +729,7 @@ def slide_16(pdf, rows):
                "convention) - a state a company didn't separately disclose falls "
                "under \"Others (unclassified)\" rather than being guessed at."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Geographical Distribution: Zones", 16, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Geographical Distribution: Zones", 16, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -763,7 +762,7 @@ def slide_17(pdf, rows):
 
     bullets = ["State-wise GDPI as a share of each company's own GWP."]
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page("Geographical Distribution: States", 17, n_panels, want_insights=True, hspace=0.55,
+    fig, panels, ins = new_page("Geographical Distribution: States", 17, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
@@ -898,15 +897,15 @@ def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, n
         if has_pri:
             pri = _fractions_of_row_total(pri, len(keys))
     n_panels = int(has_cur) + int(has_pri)
-    fig, panels, ins = new_page(title, page_no, n_panels, want_insights=True, n_insight_lines=1)
+    fig, panels, ins = new_page(title, page_no, n_panels, want_insights=True, hspace=0.75, n_insight_lines=1)
     idx = 0
     if has_cur:
-        panel_title(fig, panels[idx], cfg.cur_period_label())
+        charts.panel_box(fig, panels[idx], title=cfg.cur_period_label())
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur, colors, pct100=True)
         idx += 1
     if has_pri:
-        panel_title(fig, panels[idx], cfg.prior_period_label())
+        charts.panel_box(fig, panels[idx], title=cfg.prior_period_label())
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri, colors, pct100=True)
     draw_insights(fig, ins, [note])

@@ -971,16 +971,20 @@ def extract_income_statement(company_short, pdf_path):
 
     # Gross Commission and Commission on Re-insurance Accepted are only on
     # NL-6 itself (NL-1 nets them away into the single "Commission" line
-    # above) - needed for the EOM Ratio formula.
+    # above) - needed for the EOM Ratio formula. Some insurers (e.g.
+    # ManipalCigna) don't use the label "Gross Commission" at all - their
+    # NL-6 calls the same line "Direct Commission" instead.
     nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
     nl6_text = None
     if nl6 is None:
         nl6_text, _ = get_form_text(pdf_path, r"FORM\s+NL-6")
     if nl6:
-        gross_commission = get_line_item(nl6, "Gross Commission")
+        gross_commission = get_line_item_any(nl6, [("Gross Commission",), ("Direct Commission",)])
         ri_accepted_commission = get_line_item(nl6, "Commission on Re-insurance Accepted")
     elif nl6_text:
         gross_commission = get_line_item_from_text(nl6_text, "Gross Commission", form="NL-6")
+        if gross_commission == (None, None):
+            gross_commission = get_line_item_from_text(nl6_text, "Direct Commission", form="NL-6")
         ri_accepted_commission = get_line_item_from_text(nl6_text, "Commission on Re-insurance Accepted", form="NL-6")
     else:
         gross_commission = ri_accepted_commission = (None, None)
@@ -1723,10 +1727,15 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         round(nw_prior * 100, 2) if nw_prior is not None else None,
     )
 
-    # Slide 23: Cumulative Capital = Share Capital + Share Application Money
-    # Pending Allotment + Share Premium, read directly off NL-3/NL-10 (see
-    # extract_cumulative_capital) - not computed here.
-    D[(23, "Cumulative Capital", None)] = income.get("cumulative_capital", (None, None))
+    # Slide 23's "Capital" row = Cumulative Capital = Share Capital + Share
+    # Application Money Pending Allotment + Share Premium, read directly off
+    # NL-3/NL-10 (see extract_cumulative_capital) - not computed here. The
+    # Data Engine template has no separate "Cumulative Capital" row at all
+    # (confirmed against data/templates/Data_Engine_Template.xlsx: Slide 23
+    # only has PBT/Capital/Net Worth) - "Capital" IS this figure, not plain
+    # Share Capital alone (which is still used, unmodified, in Net Worth's
+    # own formula below via get("capital")).
+    D[(23, "Capital", None)] = income.get("cumulative_capital", (None, None))
 
     # Slide 27: Historical Trends duplicate GWP/PBT from Slide 18
     D[(27, "GWP", None)] = (gwp_cur, gwp_prior)

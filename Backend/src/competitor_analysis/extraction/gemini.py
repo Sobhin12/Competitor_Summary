@@ -156,8 +156,11 @@ def master_metric_specs():
         specs.append({"key": key, "description": description, "forms": forms, "kind": kind, "rows": rows})
 
     # --- NL-3 Balance Sheet: Capital, Net Worth ---
-    add("capital", "Share Capital (paid-up equity capital), from the Balance Sheet (NL-3).", ["NL-3"], "money",
-        [(23, "Capital", None)])
+    # capital feeds Net Worth's own formula only (Python-side) - Slide 23's
+    # "Capital" row itself is Cumulative Capital (Share Capital + Share
+    # Application Money + Share Premium), a deterministic pdfplumber read
+    # (data_engine.extract_cumulative_capital), not this LLM extraction.
+    add("capital", "Share Capital (paid-up equity capital), from the Balance Sheet (NL-3).", ["NL-3"], "money", [])
     add("bs_reserves_surplus", "Reserves and Surplus, from the Balance Sheet (NL-3), 'Sources of Funds' section.", ["NL-3"], "money", [])
     add("bs_debit_balance_pl", "Debit Balance in Profit and Loss Account (accumulated losses carried on the balance sheet, if any - 0 if not present), from the Balance Sheet (NL-3), 'Application of Funds' section.", ["NL-3"], "money", [])
 

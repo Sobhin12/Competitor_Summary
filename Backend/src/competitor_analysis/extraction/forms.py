@@ -293,7 +293,16 @@ def _extend_to_total_column(table, anchor_row_idx, anchor_col_idx):
     hi = min(len(table), anchor_row_idx + window + 1)
 
     anchor_label = None
-    search_order = list(range(anchor_row_idx, lo - 1, -1)) + list(range(anchor_row_idx + 1, hi))
+    # Never the anchor row itself: e.g. ABHI's NL-1 places the period header
+    # ("For The Year Ended ...", which itself contains neither "quarter" nor
+    # "period") directly one row above its own group-label row - including
+    # the anchor row here let that self-referential text pass the exclusion
+    # check and get accepted AS the group label, which then went unbounded
+    # (its own text never repeats) and silently grabbed a wrong "total" cell
+    # from a different period block entirely. Confirmed against a real
+    # filing: this returned the PRIOR year's Total column as the "current"
+    # one for Net Incurred Claims/Operating Expenses/Net Commission.
+    search_order = list(range(anchor_row_idx - 1, lo - 1, -1)) + list(range(anchor_row_idx + 1, hi))
     for ridx in search_order:
         row = table[ridx]
         if anchor_col_idx < len(row) and row[anchor_col_idx]:

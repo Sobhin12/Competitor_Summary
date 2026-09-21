@@ -309,10 +309,13 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
         b1, b2 = _draw(ax)
         for bars, vals in ((b1, pri), (b2, cur)):
             ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=6.5, padding=1)
-        _add_headroom(ax, pri + cur)
+        # Extra headroom (vs. the 0.14 default) so the legend - anchored at
+        # the very top of the axes - has clear air above the tallest bar's
+        # value label instead of sitting on top of it.
+        _add_headroom(ax, pri + cur, frac=0.30)
         ax.set_xticklabels(cats, fontsize=8)
         _style_bar_axes(ax)
-        ax.legend(fontsize=7, frameon=False, loc="upper right")
+        ax.legend(fontsize=7, frameon=False, loc="upper right", bbox_to_anchor=(1.0, 1.02))
         return True
 
     bottom_max, top_max = brk

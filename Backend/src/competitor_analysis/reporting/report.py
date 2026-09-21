@@ -619,6 +619,10 @@ def slide_13(pdf, rows):
     has_pri = any(any(v is not None for v in vals) for vals in pri_series.values())
     if not has_cur and not has_pri:
         return
+    # Data Engine cell stays Rs. Lakhs (GT-verified) - rescale to Rs. Crore
+    # for this chart's display/totals only, same convention as Slide 23.
+    cur_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in cur_series.items()}
+    pri_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in pri_series.items()}
 
     bullets = ["Individual Agents remain the largest commission channel for most companies.",
                "Channel mix as % of each company's own total gross commission."]
@@ -628,14 +632,14 @@ def slide_13(pdf, rows):
     idx = 0
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}",
-                          unit_label="Rs. Lakhs")
+                          unit_label="Rs. Crore")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx],
                           title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}",
-                          unit_label="Rs. Lakhs")
+                          unit_label="Rs. Crore")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True)
     draw_insights(fig, ins, bullets)
@@ -650,6 +654,13 @@ def metric_panels_page(pdf, rows, slide_no, title, page_no, panels_def, footnote
         keys, prior, current = data.metric_series(cdata, pdef["metric1"], pdef.get("metric2"))
         if not keys:
             continue
+        scale = pdef.get("scale")
+        if scale is not None:
+            # Display-only unit rescale (e.g. Lakhs -> Crore) - the
+            # underlying Data Engine cell keeps its GT-verified unit;
+            # only this chart's numbers/insight bullets change.
+            current = [v * scale if v is not None else None for v in current]
+            prior = [v * scale if v is not None else None for v in prior]
         resolved.append((pdef, keys, prior, current))
     if not resolved:
         return
@@ -868,7 +879,9 @@ def slide_22(pdf, rows):
 def slide_23(pdf, rows):
     panels = [
         {"title": "Capital (Rs. Crore)", "metric1": "Capital", "metric2": None, "kind": "money"},
-        {"title": "Net Worth (Rs. Lakhs)", "metric1": "Net Worth", "metric2": None, "kind": "money"},
+        # Data Engine cell stays Rs. Lakhs (GT-verified) - "scale" converts
+        # only this chart's display (and its insight bullet) to Rs. Crore.
+        {"title": "Net Worth (Rs. Crore)", "metric1": "Net Worth", "metric2": None, "kind": "money", "scale": 0.01},
         {"title": "PBT (Rs. Crore)", "metric1": "PBT", "metric2": None, "kind": "money"},
     ]
     metric_panels_page(pdf, rows, 23, "Key Metrics", 23, panels)

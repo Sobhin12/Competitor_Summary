@@ -80,11 +80,8 @@ def _footer(fig, page_no):
 
 def _header_footer(fig, title, page_no):
     _left_border(fig)
-    # Q4 is the full-year close, so the header drops the quarter and just
-    # says the FY - every other quarter keeps "FY.. Qn" since the header is
-    # the only place on the page naming which quarter's cut this is.
-    header_period = cfg.FY if cfg.QUARTER == "Q4" else cfg.cur_period_label()
-    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {header_period}", fontsize=12.5,
+    # cur_period_label() itself omits the quarter for Q4 (config.period_label).
+    fig.text(_MARGIN_L, 0.965, f"Competition Analysis {cfg.cur_period_label()}", fontsize=12.5,
               fontweight="bold", color=theme.NAVY)
     fig.add_artist(Line2D([_MARGIN_L, _MARGIN_R], [0.955, 0.955], transform=fig.transFigure, color=theme.BLUE,
                           linewidth=1.5))

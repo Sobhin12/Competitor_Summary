@@ -314,9 +314,14 @@ def data_engine_output_path(fy: str = None, quarter: str = None) -> str:
 
 
 def period_label(fy: str = None, quarter: str = None) -> str:
-    """'FY25-26 Q3' - display form."""
+    """'FY25-26 Q3' - display form. Q4 is the full financial year's close, so
+    the quarter is omitted there ('FY25-26' alone) - every other quarter
+    keeps 'FY.. Qn' since that's the only thing distinguishing which
+    quarter's cut a figure is. Applies everywhere this feeds report display
+    text (headers, panel/chart titles, doughnut labels, bullets) - none of
+    it is used for data plumbing (see period_column() for that)."""
     fy, quarter = _require(fy, quarter)
-    return f"{fy} {quarter}"
+    return fy if quarter == "Q4" else f"{fy} {quarter}"
 
 
 def cur_period_label() -> str:

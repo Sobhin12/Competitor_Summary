@@ -2058,6 +2058,15 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
 
     for key, rows in rows_by_key.items():
         cur, prior = _converted_value(regrouped, kind_by_key, key)
+        if key == "solvency_ratio":
+            # Solvency Ratio is a "No. of times" multiple everywhere (typically
+            # 1.5-10x) - some insurers' NL-20 schedule prints it as a percentage
+            # instead (e.g. "184%"), which the model can extract literally as
+            # 184 despite the spec asking for a multiple (GT-verified case:
+            # Manipal Cigna). >20 is never a real multiple, so treat it as a
+            # percentage and rescale, regardless of which company it is.
+            cur = cur / 100 if cur is not None and cur > 20 else cur
+            prior = prior / 100 if prior is not None and prior > 20 else prior
         for (slide, metric1, metric2) in rows:
             written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, log)
 

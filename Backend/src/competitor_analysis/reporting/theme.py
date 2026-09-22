@@ -76,6 +76,21 @@ SEGMENT_COLORS = {
 FALLBACK_SERIES_COLORS = ["#2E75B6", "#ED7D31", "#70AD47", "#FFC000", "#7C3AED",
                           "#264E70", "#C00000", "#00B0B0", "#A9D18E", "#BFBFBF"]
 
+# Slide 3's GI Industry segment mix, clubbed into 4 buckets (see report.py's
+# GI_SEGMENT_GROUPS) - fixed colors rather than FALLBACK_SERIES_COLORS so the
+# bucket order/palette matches the reference deck exactly.
+GI_SEGMENT_COLORS = {
+    "Fire & Engineering": "#8FAADC",
+    "Motor": ORANGE,
+    "Health, Travel & PA": "#70AD47",
+    "Others": "#7F4B26",
+}
+
+# Page chrome (left border strip, footer ribbon/band) - eyeballed from the
+# reference deck screenshot, not a documented brand hex.
+BORDER_ACCENT = "#C0504D"
+RIBBON_BLUE = "#9DC3E6"
+
 
 def series_colors_for(names):
     return {name: FALLBACK_SERIES_COLORS[i % len(FALLBACK_SERIES_COLORS)] for i, name in enumerate(names)}

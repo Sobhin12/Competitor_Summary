@@ -193,8 +193,9 @@ def cover_page(pdf):
 
 TOC_ENTRIES = [
     ("Overall Industry & Market share", "3-7"), ("Revenue (Segment, Channel, Geographical mix)", "8-17"),
-    ("Income statement", "18"), ("Key metrics", "19-23"), ("Investment portfolio", "24-26"),
-    ("Historical trends", "27-31"), ("AUM", "32-33"), ("Distribution footprints", "34-35"),
+    ("Income statement", "18"), ("Segment performance (Health, PA, Travel)", "19-21"),
+    ("Key metrics", "22-26"), ("Investment portfolio", "27-29"),
+    ("Historical trends", "30-34"), ("AUM", "35-36"), ("Distribution footprints", "37-38"),
 ]
 
 
@@ -783,13 +784,12 @@ def slide_16(pdf, rows):
     if not keys:
         return
     names = disp_names(keys)
-    zones = ["North", "South", "East", "West", "Central", "Others (unclassified)"]
+    zones = ["North", "South", "East", "West", "Central"]
     # "East" collided with SAHI's own green (theme.SEGMENT_COLORS["SAHI"],
     # already used for "South") in the pre-merge version of this dict -
-    # picked ORANGE instead so all 6 zones stay visually distinct.
+    # picked ORANGE instead so all 5 zones stay visually distinct.
     colors = {"North": theme.SEGMENT_COLORS["Public"], "South": theme.SEGMENT_COLORS["SAHI"],
-              "East": theme.ORANGE, "West": theme.SEGMENT_COLORS["Private"], "Central": "#7C3AED",
-              "Others (unclassified)": "#BFBFBF"}
+              "East": theme.ORANGE, "West": theme.SEGMENT_COLORS["Private"], "Central": "#7C3AED"}
     cur_series = {z: [cdata[k].get((z, None), (None, None))[0] for k in keys] for z in zones}
     pri_series = {z: [cdata[k].get((z, None), (None, None))[1] for k in keys] for z in zones}
     has_cur = any(any(v is not None for v in vals) for vals in cur_series.values())
@@ -797,9 +797,7 @@ def slide_16(pdf, rows):
     if not has_cur and not has_pri:
         return
 
-    bullets = ["Zone split is derived from named-state data (standard MHA zonal "
-               "convention) - a state a company didn't separately disclose falls "
-               "under \"Others (unclassified)\" rather than being guessed at."]
+    bullets = ["Zone split is derived from named-state data (standard MHA zonal convention)."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("Geographical Distribution: Zones", 16, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
@@ -880,10 +878,55 @@ def slide_18(pdf, rows):
 
 
 # ---------------------------------------------------------------------------
-# Slides 19-23: Key Metrics
+# Slides 19-21: Segment-wise Performance (Health / Personal Accident / Travel)
+# Deterministic NL-4/5/6/7 extraction (extract_segment_income_statement),
+# same "two income_table panels, cur then prior" shape as slide 18 - unlike
+# slide 18 there is no NL-1/NL-2 company-wide summary to read the net lines
+# from at this granularity, so every raw figure comes from its own segmented
+# schedule (see data_engine.extract_segment_income_statement's docstring).
 # ---------------------------------------------------------------------------
 
+SEGMENT_ROWS = ["Gross Written Premium", "Net Written Premium", "Earned Premium", "Claims",
+                "Gross Commission", "RI Commission", "Net Commission", "Operating Expenses",
+                "UW Profit/(Loss)", "Combined Ratio", "Loss Ratio", "Expense Ratio"]
+SEGMENT_PERCENT_ROWS = {"Combined Ratio", "Loss Ratio", "Expense Ratio"}
+
+
+def segment_income_statement_page(pdf, rows, title, page_no, slide_no):
+    cdata = data.by_company(rows, slide_no, theme.canonical_company)
+    keys = [k for k in data.COMPANY_ORDER if k in cdata]
+    if not keys:
+        return
+    cur_vals = {label: {k: cdata[k].get((label, None), (None, None))[0] for k in keys} for label in SEGMENT_ROWS}
+    pri_vals = {label: {k: cdata[k].get((label, None), (None, None))[1] for k in keys} for label in SEGMENT_ROWS}
+    fig, panels, _ins = new_page(title, page_no, 2)
+    ax1 = fig.add_subplot(panels[0])
+    charts.income_table(ax1, SEGMENT_ROWS, keys, cur_vals, f"{cfg.cur_period_label()} (Rs. Crore)",
+                         percent_rows=SEGMENT_PERCENT_ROWS)
+    ax2 = fig.add_subplot(panels[1])
+    charts.income_table(ax2, SEGMENT_ROWS, keys, pri_vals, f"{cfg.prior_period_label()} (Rs. Crore)",
+                         percent_rows=SEGMENT_PERCENT_ROWS)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def slide_19(pdf, rows):
+    segment_income_statement_page(pdf, rows, "Segment Performance - Health", 19, 19)
+
+
+def slide_20(pdf, rows):
+    segment_income_statement_page(pdf, rows, "Segment Performance - Personal Accident", 20, 20)
+
+
+def slide_21(pdf, rows):
+    segment_income_statement_page(pdf, rows, "Segment Performance - Travel", 21, 21)
+
+
+# ---------------------------------------------------------------------------
+# Slides 22-26: Key Metrics
+# ---------------------------------------------------------------------------
+
+def slide_22(pdf, rows):
     panels = [
         {"title": "Combined Ratio", "metric1": "Combined Ratio", "metric2": None, "kind": "percent",
          "higher_is_better": False},
@@ -892,10 +935,10 @@ def slide_19(pdf, rows):
         {"title": "Loss Ratio", "metric1": "Loss Ratio", "metric2": None, "kind": "percent",
          "higher_is_better": False},
     ]
-    metric_panels_page(pdf, rows, 19, "Key Metrics", 19, panels)
+    metric_panels_page(pdf, rows, 22, "Key Metrics", 22, panels)
 
 
-def slide_20(pdf, rows):
+def slide_23(pdf, rows):
     panels = [
         {"title": "Claims Settlement Ratio", "metric1": "Claims Settlement Ratio", "metric2": None,
          "kind": "percent", "mode": "single"},
@@ -906,11 +949,11 @@ def slide_20(pdf, rows):
         {"title": "No. of Claims to No. of Policies", "metric1": "No. of claims to No. of policies", "metric2": None,
          "kind": "percent", "mode": "single", "higher_is_better": False},
     ]
-    metric_panels_page(pdf, rows, 20, "Key Metrics", 20, panels,
+    metric_panels_page(pdf, rows, 23, "Key Metrics", 23, panels,
                         footnote="Average Claim Size and No. of claims to policies are best-effort estimates.")
 
 
-def slide_21(pdf, rows):
+def slide_24(pdf, rows):
     panels = [
         {"title": "Opex. To GWP ratio", "metric1": "Opex. To GWP ratio", "metric2": None, "kind": "percent",
          "higher_is_better": False},
@@ -918,10 +961,10 @@ def slide_21(pdf, rows):
          "higher_is_better": False},
         {"title": "IT spend to GWP ratio", "metric1": "IT spend to GWP ratio", "metric2": None, "kind": "percent"},
     ]
-    metric_panels_page(pdf, rows, 21, "Key Metrics", 21, panels)
+    metric_panels_page(pdf, rows, 24, "Key Metrics", 24, panels)
 
 
-def slide_22(pdf, rows):
+def slide_25(pdf, rows):
     panels = [
         {"title": "Manpower cost to total Opex", "metric1": "Manpower cost to total Opex", "metric2": None,
          "kind": "percent"},
@@ -930,10 +973,10 @@ def slide_22(pdf, rows):
         {"title": "Facility rental per office per month (Rs. Lakhs)", "metric1": "Facility rental per office per month",
          "metric2": None, "kind": "money", "mode": "single"},
     ]
-    metric_panels_page(pdf, rows, 22, "Key Metrics", 22, panels)
+    metric_panels_page(pdf, rows, 25, "Key Metrics", 25, panels)
 
 
-def slide_23(pdf, rows):
+def slide_26(pdf, rows):
     panels = [
         {"title": "Capital (Rs. Crore)", "metric1": "Capital", "metric2": None, "kind": "money"},
         # Data Engine cell stays Rs. Lakhs (GT-verified) - "scale" converts
@@ -941,11 +984,11 @@ def slide_23(pdf, rows):
         {"title": "Net Worth (Rs. Crore)", "metric1": "Net Worth", "metric2": None, "kind": "money", "scale": 0.01},
         {"title": "PBT (Rs. Crore)", "metric1": "PBT", "metric2": None, "kind": "money"},
     ]
-    metric_panels_page(pdf, rows, 23, "Key Metrics", 23, panels)
+    metric_panels_page(pdf, rows, 26, "Key Metrics", 26, panels)
 
 
 # ---------------------------------------------------------------------------
-# Slides 24-26: Investment / Debt Portfolio
+# Slides 27-29: Investment / Debt Portfolio
 # ---------------------------------------------------------------------------
 
 def _fractions_of_row_total(series_dict, n):
@@ -990,95 +1033,95 @@ def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, n
     plt.close(fig)
 
 
-def slide_24(pdf, rows):
+def slide_27(pdf, rows):
     series_names = ["Corporate Bonds/Debentures", "Govt Bonds", "Deposits", "Equity/Invits/REIT", "Mutual Funds"]
     # Not normalize=True: these bucket values are already absolute Rs. Crore
     # (extract_investment_portfolio), so stacked_bar's own pct100 does the
     # %-mix conversion and show_totals can print the real absolute total.
-    two_period_stacked_page(pdf, rows, 24, "Investment Portfolio", 24, series_names,
+    two_period_stacked_page(pdf, rows, 27, "Investment Portfolio", 27, series_names,
                              "Investment mix as % of each company's own book value.",
                              show_totals=True, unit_label="Rs. Crore")
 
 
-def slide_25(pdf, rows):
+def slide_28(pdf, rows):
     series_names = ["Sovereign", "AAA rated", "AA or better", "Rated below AA but above A", "Rated below A"]
-    two_period_stacked_page(pdf, rows, 25, "Debt Portfolio: Credit Rating", 25, series_names,
+    two_period_stacked_page(pdf, rows, 28, "Debt Portfolio: Credit Rating", 28, series_names,
                              "Exposure by credit rating.")
 
 
-def slide_26(pdf, rows):
+def slide_29(pdf, rows):
     series_names = ["Up to 1 year", "More than 1 year and upto 3 years", "More than 3 years and upto 7 years",
                      "More than 7 years and upto 10 years", "Above 10 years"]
-    two_period_stacked_page(pdf, rows, 26, "Debt Portfolio: Residual Maturity", 26, series_names,
+    two_period_stacked_page(pdf, rows, 29, "Debt Portfolio: Residual Maturity", 29, series_names,
                              "Exposure by residual maturity.")
 
 
 # ---------------------------------------------------------------------------
-# Slides 27-33: Historical Trends (Key Ratios) / Asset Under Management -
+# Slides 30-36: Historical Trends (Key Ratios) / Asset Under Management -
 # multi-year, from data/historical/Historical_Trends.xlsx. Replaces this
 # range's earlier 2-period cur/prior bars (which carried a footnote
 # apologizing for not having real multi-year history - now they do).
 # ---------------------------------------------------------------------------
 
-def slide_27(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 27, [
+def slide_30(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 30, [
         {"title": "GWP"},
         {"title": "PBT"},
     ])
 
 
-def slide_28(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 28, [
+def slide_31(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 31, [
         {"title": "Combined Ratio", "is_percent": True, "unit_label": None},
         {"title": "Loss Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_29(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 29, [
+def slide_32(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 32, [
         {"title": "Expense Ratio", "is_percent": True, "unit_label": None},
         {"title": "Expense of Management Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_30(pdf, rows):
-    historical_trend_page(pdf, "RI Ceded", 30, [
+def slide_33(pdf, rows):
+    historical_trend_page(pdf, "RI Ceded", 33, [
         {"title": "RI Ceding Ratio", "is_percent": True, "unit_label": None},
         {"title": "RI Commission to Ceding Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_31(pdf, rows):
-    historical_trend_page(pdf, "ROE & Solvency", 31, [
+def slide_34(pdf, rows):
+    historical_trend_page(pdf, "ROE & Solvency", 34, [
         {"title": "ROE", "is_percent": True, "unit_label": None},
         {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{v:.2f}x"},
     ])
 
 
-def slide_32(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 32, [
+def slide_35(pdf, rows):
+    historical_trend_page(pdf, "Asset Under Management", 35, [
         {"title": "AUM"},
         {"title": "Investment Yield", "is_percent": True, "unit_label": None,
          "value_fmt": lambda v: f"{v * 100:.1f}%"},
     ])
 
 
-def slide_33(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 33, [
+def slide_36(pdf, rows):
+    historical_trend_page(pdf, "Asset Under Management", 36, [
         {"title": "AUM Shareholders"},
         {"title": "AUM Policyholders"},
     ])
 
 
 # ---------------------------------------------------------------------------
-# Slides 34-35: Distribution Footprint
+# Slides 37-38: Distribution Footprint
 # ---------------------------------------------------------------------------
 
-def slide_34(pdf, rows):
+def slide_37(pdf, rows):
     """Multi-year trend, sourced from reporting.historical - replaces this
     slide's earlier current-period-only bars. `rows` unused, kept only so
     SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
-    historical_trend_page(pdf, "Distribution Footprint", 34, [
+    historical_trend_page(pdf, "Distribution Footprint", 37, [
         {"title": "Employees", "panel_title": "Employees (On-roll)", "unit_label": "Count"},
         {"title": "Agents", "panel_title": "Individual Agents", "unit_label": "Count"},
     ])
@@ -1087,7 +1130,7 @@ def slide_34(pdf, rows):
 INTERMEDIARY_TYPES = ["Individual Agents", "CA-Banks", "CA-Others", "Brokers", "WA", "IMF", "POS"]
 
 
-def slide_35(pdf, rows):
+def slide_38(pdf, rows):
     """No. of Offices is now a multi-year trend from reporting.historical;
     Intermediaries by type has no multi-year workbook table, so it stays on
     the Data Engine's current-period `rows`, same as before - this slide mixes
@@ -1102,7 +1145,7 @@ def slide_35(pdf, rows):
         off_years = historical.sorted_years(off_table)
         off_values = {k: [off_table[k].get(y) for y in off_years] for k in off_keys}
 
-    cdata = data.by_company(rows, 35, theme.canonical_company)
+    cdata = data.by_company(rows, 38, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
     names = disp_names(keys)
     series = {t: [cdata[k].get(("Intermediaries", t), (None, None))[0] for k in keys] for t in INTERMEDIARY_TYPES}
@@ -1115,7 +1158,7 @@ def slide_35(pdf, rows):
     # bullet this slide used to compute from a single period) - bottom=0.13
     # keeps the last panel's legend clear of the footer, same as
     # historical_trend_page's pages.
-    fig, panels, _ins = new_page("Distribution Footprint", 35, n_panels, hspace=0.5, bottom=0.13)
+    fig, panels, _ins = new_page("Distribution Footprint", 38, n_panels, hspace=0.5, bottom=0.13)
     idx = 0
     if has_off:
         charts.trend_lines(fig, panels[idx], off_years, off_keys, off_values, title="No. of Offices",
@@ -1186,7 +1229,7 @@ def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
 SECTION_FUNCS = [slide_03, slide_04, slide_05, slide_06, slide_07, slide_08, slide_09, slide_10, slide_11,
                  slide_12, slide_13, slide_14, slide_15, slide_16, slide_17, slide_18, slide_19, slide_20,
                  slide_21, slide_22, slide_23, slide_24, slide_25, slide_26, slide_27, slide_28, slide_29,
-                 slide_30, slide_31, slide_32, slide_33, slide_34, slide_35]
+                 slide_30, slide_31, slide_32, slide_33, slide_34, slide_35, slide_36, slide_37, slide_38]
 
 
 def build(out_path=None, data_engine_path=None):
@@ -1198,7 +1241,7 @@ def build(out_path=None, data_engine_path=None):
         toc_page(pdf, 2)
         for fn in SECTION_FUNCS:
             fn(pdf, rows)
-        glossary_page(pdf, 36)
+        glossary_page(pdf, 39)
     print(f"Saved {out_path}")
     return out_path
 

@@ -112,6 +112,20 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     print(f"[Income Statement] {inc_updated} rows written, {len(inc_skipped)} unmatched  -  "
           f"extract: {sum(v['income_statement'] for v in per_company.values()):.1f}s, write: {t_income_write:.1f}s")
 
+    # ---- Stage 2b: per-company, per-segment income statement (Slides 19-21) ----
+    # Reuses the same on-disk PDF-JSON cache Stage 2 already warmed (both go
+    # through forms.get_form_page -> pdf_cache.get_company_json), so this is
+    # just re-scanning already-parsed tables, not re-parsing PDFs.
+    t0 = time.time()
+    seg_total_updated, seg_total_skipped = 0, 0
+    for slide_no, segment in ((19, "Health"), (20, "Personal Accident"), (21, "Travel")):
+        seg_updated, seg_skipped = p.apply_segment_income_statement_rows(ws, slide_no, segment)
+        seg_total_updated += seg_updated
+        seg_total_skipped += len(seg_skipped)
+    t_segment_write = time.time() - t0
+    print(f"[Segment P&L]      {seg_total_updated} rows written, {seg_total_skipped} unmatched  -  "
+          f"write: {t_segment_write:.1f}s")
+
     # ---- Stage 3: Gemini-based metrics (Slides 12-35) ----
     # All companies' model calls are issued up front under one shared
     # concurrency gate; the per-company loop below then only converts and

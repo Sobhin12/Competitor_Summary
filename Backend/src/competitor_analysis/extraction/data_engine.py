@@ -30,6 +30,7 @@ import openpyxl
 
 from competitor_analysis.extraction.forms import (COMPANY_PDFS, get_form_page, get_line_item, get_line_item_any,
                           get_form_text, get_line_item_from_text, sum_rows_after,
+                          get_segment_line_item, get_segment_line_item_any,
                           extract_nl36 as pdf_extract_nl36, NL36_CHANNELS,
                           RESOLUTION_LOG, year_frags as pdf_extract_year_frags,
                           _is_cumulative_header, _SNAPSHOT_PHRASE_RE)
@@ -1254,7 +1255,7 @@ CATEGORY_CODE_TO_BUCKET = {
     "EGMF": "Mutual Funds", "EMPG": "Mutual Funds", "OMGS": "Mutual Funds",
 }
 
-# Matches slide_24's series_names in reporting/report.py exactly.
+# Matches slide_27's series_names in reporting/report.py exactly.
 INVESTMENT_PORTFOLIO_BUCKETS = (
     "Govt Bonds", "Corporate Bonds/Debentures", "Deposits", "Equity/Invits/REIT", "Mutual Funds",
 )
@@ -1512,6 +1513,149 @@ apply_income_statement_rows._cache = {}
 
 
 # ---------------------------------------------------------------------------
+# Segment-wise (Health / Personal Accident / Travel) underwriting P&L
+# ---------------------------------------------------------------------------
+
+def extract_segment_income_statement(company_short, pdf_path, segment):
+    """Returns {metric_label: (cur_cr, prior_cr)} for one company's ONE
+    line-of-business segment (segment="Health"/"Personal Accident"/"Travel",
+    see forms._SEGMENT_ALIASES), sourced directly from NL-4 (premium), NL-5
+    (claims), NL-6 (commission) and NL-7 (operating expenses).
+
+    Unlike extract_income_statement, there is no NL-1/NL-2 income-statement
+    summary to read pre-netted company-wide figures from at this
+    granularity - NL-1/NL-2 are company-wide only - so every raw line here
+    is read from its own segmented schedule via get_segment_line_item(_any),
+    and Net Commission/Net Incurred Claims are each schedule's OWN "Net"
+    line (not restated from NL-1 the way extract_income_statement reuses
+    them).
+
+    "Gross Commission" and "Gross Written Premium" each need a manual add of
+    the schedule's own "Commission/Premium on Re-insurance Accepted" line -
+    confirmed against a real filing (ManipalCigna) that its schedule's own
+    "Direct Commission"/"Premium from direct business written" rows exclude
+    that component even though NBHI's analogously-named rows happen to
+    already include it (NBHI's RI-accepted commission for Health is ~0, so
+    omitting the add there was invisible until cross-checked against a
+    company whose RI-accepted figure isn't zero)."""
+    out = {}
+
+    nl4, _ = get_form_page(pdf_path, r"FORM\s+NL-4(?!\d)")
+    if nl4:
+        gdp = get_segment_line_item_any(nl4, segment, [("Gross Direct Premium",),
+                                                        ("Premium from direct business written",)])
+        ri_prem_accepted = get_segment_line_item(nl4, segment, "reinsurance accepted")
+        nwp = get_segment_line_item(nl4, segment, "Net Written Premium")
+        ep = get_segment_line_item_any(nl4, segment, [("Net Earned Premium",),
+                                                       ("Total Premium Earned (Net)",),
+                                                       ("Premium Earned (Net)",)])
+    else:
+        gdp = ri_prem_accepted = nwp = ep = (None, None)
+
+    nl5, _ = get_form_page(pdf_path, r"FORM\s+NL-5")
+    claims = get_segment_line_item_any(nl5, segment, [("Net Incurred Claims",), ("Incurred Claims",)]) \
+        if nl5 else (None, None)
+
+    nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
+    if nl6:
+        gross_comm = get_segment_line_item_any(nl6, segment, [("Gross Commission",), ("Direct Commission",)])
+        ri_comm_accepted = get_segment_line_item(nl6, segment, "Commission on Re-insurance Accepted")
+        ri_comm_ceded = get_segment_line_item_any(nl6, segment, [("Commission on Re-insurance Ceded",),
+                                                                  ("Re-insurance Ceded",), ("Reinsurance Ceded",)])
+        net_comm = get_segment_line_item(nl6, segment, "Net Commission")
+    else:
+        gross_comm = ri_comm_accepted = ri_comm_ceded = net_comm = (None, None)
+
+    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7")
+    opex = get_segment_line_item(nl7, segment, "TOTAL") if nl7 else (None, None)
+
+    def _add(a, b):
+        return tuple(None if x is None else x + (y or 0) for x, y in zip(a, b))
+
+    def _neg(a):
+        return tuple(None if x is None else -x for x in a)
+
+    gwp = _add(gdp, ri_prem_accepted)
+    gross_comm_full = _add(gross_comm, ri_comm_accepted)
+    ri_comm_signed = _neg(ri_comm_ceded)
+
+    out["Gross Written Premium"] = tuple(lakhs_to_cr(v) for v in gwp)
+    out["Net Written Premium"] = tuple(lakhs_to_cr(v) for v in nwp)
+    out["Earned Premium"] = tuple(lakhs_to_cr(v) for v in ep)
+    out["Claims"] = tuple(lakhs_to_cr(v) for v in claims)
+    out["Gross Commission"] = tuple(lakhs_to_cr(v) for v in gross_comm_full)
+    out["RI Commission"] = tuple(lakhs_to_cr(v) for v in ri_comm_signed)
+    out["Net Commission"] = tuple(lakhs_to_cr(v) for v in net_comm)
+    out["Operating Expenses"] = tuple(lakhs_to_cr(v) for v in opex)
+
+    # Derived, pure arithmetic on the already-extracted Crore figures above -
+    # no further extraction needed. UW Profit/(Loss) = EP - Claims - Net
+    # Commission - Opex; Loss Ratio = Claims/EP; Expense Ratio = (Net
+    # Commission + Opex)/NWP; Combined Ratio = Loss + Expense.
+    def _derived(ep_v, nwp_v, claims_v, net_comm_v, opex_v):
+        uw = (ep_v - claims_v - net_comm_v - opex_v) if None not in (ep_v, claims_v, net_comm_v, opex_v) else None
+        loss = (claims_v / ep_v) if (claims_v is not None and ep_v) else None
+        expense = ((net_comm_v + opex_v) / nwp_v) if (None not in (net_comm_v, opex_v) and nwp_v) else None
+        combined = (loss + expense) if None not in (loss, expense) else None
+        return uw, loss, expense, combined
+
+    cur = _derived(out["Earned Premium"][0], out["Net Written Premium"][0], out["Claims"][0],
+                    out["Net Commission"][0], out["Operating Expenses"][0])
+    prior = _derived(out["Earned Premium"][1], out["Net Written Premium"][1], out["Claims"][1],
+                      out["Net Commission"][1], out["Operating Expenses"][1])
+    out["UW Profit/(Loss)"] = (cur[0], prior[0])
+    out["Loss Ratio"] = (cur[1], prior[1])
+    out["Expense Ratio"] = (cur[2], prior[2])
+    out["Combined Ratio"] = (cur[3], prior[3])
+    return out
+
+
+def apply_segment_income_statement_rows(ws, slide_no, segment, dry_run=False):
+    """apply_income_statement_rows' counterpart for one segment-wise slide -
+    fills Slide #==slide_no rows from extract_segment_income_statement(...,
+    segment), cached per (company, segment) so each is only extracted once
+    even though this is called once per segment slide."""
+    updated, skipped = 0, []
+    for r in range(2, ws.max_row + 1):
+        d = row_dict(ws, r)
+        if d["Slide #"] != slide_no:
+            continue
+        if d[CUR] is not None and d[PRIOR] is not None:
+            continue
+        company = (d["Company"] or "").strip()
+        metric1 = (d["Meric 1"] or "").strip()
+        if company not in COMPANY_PDFS:
+            skipped.append((r, company, metric1, "no PDF"))
+            continue
+        cache = apply_segment_income_statement_rows._cache
+        cache_key = (company, segment)
+        if cache_key not in cache:
+            print(f"  extracting {segment} income statement for {company} ...")
+            cache[cache_key] = extract_segment_income_statement(company, COMPANY_PDFS[company], segment)
+        vals = cache[cache_key].get(metric1)
+        if vals is None:
+            skipped.append((r, company, metric1, "metric not found"))
+            continue
+        cur, prev = vals
+        if cur is None and prev is None:
+            skipped.append((r, company, metric1, "value not found in PDF"))
+            continue
+        if not dry_run:
+            if cur is not None:
+                ws.cell(row=r, column=COL[CUR]).value = cur
+            if prev is not None:
+                ws.cell(row=r, column=COL[PRIOR]).value = prev
+            g = growth(cur, prev)
+            if g is not None:
+                ws.cell(row=r, column=COL["Growth"]).value = g
+        updated += 1
+    return updated, skipped
+
+
+apply_segment_income_statement_rows._cache = {}
+
+
+# ---------------------------------------------------------------------------
 # Slides 13-35: hybrid PDF-JSON -> Gemini -> Excel pipeline
 # ---------------------------------------------------------------------------
 
@@ -1673,35 +1817,35 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     eom_ratio_cur = safe_div(eom_num_cur, gwp_cur)
     eom_ratio_prior = safe_div(eom_num_prior, gwp_prior)
 
-    D[(19, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
-    D[(19, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
-    D[(19, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
-    D[(28, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
-    D[(28, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
-    D[(29, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
-    D[(29, "Expense of Management Ratio", None)] = (eom_ratio_cur, eom_ratio_prior)
+    D[(22, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
+    D[(22, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
+    D[(22, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
+    D[(31, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
+    D[(31, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
+    D[(32, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
+    D[(32, "Expense of Management Ratio", None)] = (eom_ratio_cur, eom_ratio_prior)
 
-    # Slide 21: expense ratios to GWP
+    # Slide 24: expense ratios to GWP
     manpower_cur, manpower_prior = get("manpower_cost")
     it_cur, it_prior = get("it_spend")
-    D[(21, "Opex. To GWP ratio", None)] = (safe_div(opex_alone_cur, gwp_cur), safe_div(opex_alone_prior, gwp_prior))
-    D[(21, "Manpower to GWP ratio", None)] = (safe_div(manpower_cur, gwp_cur), safe_div(manpower_prior, gwp_prior))
-    D[(21, "IT spend to GWP ratio", None)] = (safe_div(it_cur, gwp_cur), safe_div(it_prior, gwp_prior))
+    D[(24, "Opex. To GWP ratio", None)] = (safe_div(opex_alone_cur, gwp_cur), safe_div(opex_alone_prior, gwp_prior))
+    D[(24, "Manpower to GWP ratio", None)] = (safe_div(manpower_cur, gwp_cur), safe_div(manpower_prior, gwp_prior))
+    D[(24, "IT spend to GWP ratio", None)] = (safe_div(it_cur, gwp_cur), safe_div(it_prior, gwp_prior))
 
-    # Slide 22: manpower/facility metrics (Rs. Lakhs, not Rs. - verified
+    # Slide 25: manpower/facility metrics (Rs. Lakhs, not Rs. - verified
     # against GT)
     employees_cur, _ = get("employees_onroll")
     offices_cur, _ = get("offices_count")
-    D[(22, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
+    D[(25, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
     if manpower_cur is not None and employees_cur:
-        D[(22, "Manpower cost per employee", None)] = (round(manpower_cur * 100 / employees_cur, 4), None)
+        D[(25, "Manpower cost per employee", None)] = (round(manpower_cur * 100 / employees_cur, 4), None)
     rent_cur, rent_prior = get("rent_expense")
     if rent_cur is not None and offices_cur:
         # Rent is a cumulative YTD figure, so the monthly run-rate divides by
         # however many months of the financial year this quarter covers (9 for
         # Q3, but 3/6/12 for Q1/Q2/Q4) - never a hardcoded 9.
         months = cfg.months_elapsed()
-        D[(22, "Facility rental per office per month", None)] = (
+        D[(25, "Facility rental per office per month", None)] = (
             round(rent_cur * 100 / months / offices_cur, 4), None)
 
     # Slide 23: Net Worth = Share Capital + Reserves&Surplus - Debit balance
@@ -1722,52 +1866,52 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # GT wants this row in Rs. Lakhs, not Crores (verified: nw_cur*100
     # matches GT for 5 of 7 companies within 1%; Capital/Reserves are
     # otherwise correctly extracted, this is purely a unit mismatch).
-    D[(23, "Net Worth", None)] = (
+    D[(26, "Net Worth", None)] = (
         round(nw_cur * 100, 2) if nw_cur is not None else None,
         round(nw_prior * 100, 2) if nw_prior is not None else None,
     )
 
-    # Slide 23's "Capital" row = Cumulative Capital = Share Capital + Share
+    # Slide 26's "Capital" row = Cumulative Capital = Share Capital + Share
     # Application Money Pending Allotment + Share Premium, read directly off
     # NL-3/NL-10 (see extract_cumulative_capital) - not computed here. The
     # Data Engine template has no separate "Cumulative Capital" row at all
-    # (confirmed against data/templates/Data_Engine_Template.xlsx: Slide 23
+    # (confirmed against data/templates/Data_Engine_Template.xlsx: Slide 26
     # only has PBT/Capital/Net Worth) - "Capital" IS this figure, not plain
     # Share Capital alone (which is still used, unmodified, in Net Worth's
     # own formula below via get("capital")).
-    D[(23, "Capital", None)] = income.get("cumulative_capital", (None, None))
+    D[(26, "Capital", None)] = income.get("cumulative_capital", (None, None))
 
-    # Slide 27: Historical Trends duplicate GWP/PBT from Slide 18
-    D[(27, "GWP", None)] = (gwp_cur, gwp_prior)
-    # Slides 23/27's PBT rows repeat Slide 18's cumulative PBT, for every
+    # Slide 30: Historical Trends duplicate GWP/PBT from Slide 18
+    D[(30, "GWP", None)] = (gwp_cur, gwp_prior)
+    # Slides 26/30's PBT rows repeat Slide 18's cumulative PBT, for every
     # company without exception. An earlier version substituted the
     # single-quarter figure here for the one insurer whose NL-2 has no ruled
     # gridlines; that was a workaround for the text parser mis-resolving that
     # filing's column order, which get_line_item_from_text now reads from the
     # form's own header instead.
     pbt2327_cur, pbt2327_prior = pbt_cur, pbt_prior
-    D[(27, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
-    # Slide 23 also has its own PBT row (alongside Capital/Net Worth) - same figure.
-    D[(23, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
+    D[(30, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
+    # Slide 26 also has its own PBT row (alongside Capital/Net Worth) - same figure.
+    D[(26, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
 
-    # Slide 32: Investment Yield, read directly off NL-31's own TOTAL row
+    # Slide 35: Investment Yield, read directly off NL-31's own TOTAL row
     # (see extract_investment_yield) - not computed here.
-    D[(32, "Investment Yield", None)] = income.get("investment_yield", (None, None))
+    D[(35, "Investment Yield", None)] = income.get("investment_yield", (None, None))
 
-    # Slide 24: Investment Portfolio, read directly off NL-31's per-category
+    # Slide 27: Investment Portfolio, read directly off NL-31's per-category
     # rows summed by bucket (see extract_investment_portfolio) - not computed here.
     for bucket, (cur_v, prior_v) in income.get("investment_portfolio", {}).items():
-        D[(24, bucket, None)] = (cur_v, prior_v)
+        D[(27, bucket, None)] = (cur_v, prior_v)
 
-    # Slide 30: reinsurance ratios (current period only - NL-33 has no prior-year column)
+    # Slide 33: reinsurance ratios (current period only - NL-33 has no prior-year column)
     ri_ceded_cur, _ = get("ri_ceded_total")
     ri_comm_cur, _ = get("ri_commission")
-    D[(30, "RI Ceding to GWP Ratio", "Risk Ceded")] = (safe_div(ri_ceded_cur, gwp_cur), None)
-    D[(30, "RI Commission to RI Ceding", "Risk Ceded")] = (safe_div(ri_comm_cur, ri_ceded_cur), None)
+    D[(33, "RI Ceding to GWP Ratio", "Risk Ceded")] = (safe_div(ri_ceded_cur, gwp_cur), None)
+    D[(33, "RI Commission to RI Ceding", "Risk Ceded")] = (safe_div(ri_comm_cur, ri_ceded_cur), None)
 
-    # Slide 31: ROE = PAT / Average Net Worth (current period only)
+    # Slide 34: ROE = PAT / Average Net Worth (current period only)
     if pat_cur is not None and nw_cur is not None and nw_prior is not None and (nw_cur + nw_prior) != 0:
-        D[(31, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
+        D[(34, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
 
     # Slide 13: despite the "% to GDPI" label, GT wants the absolute
     # commission amount in Rs. Lakhs, not a computed ratio - verified
@@ -1871,7 +2015,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         D[(15, "Average Productivity (per agent)", "Premium/No. of Individual Agents")] = (
             round(prem_ia_cur * 100 / agents_cur, 4), None)
 
-    # Slide 20: Claims Settlement Ratio = Claims Settled during the period /
+    # Slide 23: Claims Settlement Ratio = Claims Settled during the period /
     # (Claims O/S at beginning + Claims reported during the period - Claims
     # O/S at End) - all 4 count fields are on NL-37's own "Total" column
     # (overall company, every line of business summed). Current period only
@@ -1883,7 +2027,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     claims_denom_cur = None
     if os_start_cur is not None and reported_cur is not None:
         claims_denom_cur = os_start_cur + reported_cur - (os_end_cur or 0)
-    D[(20, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, claims_denom_cur), None)
+    D[(23, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, claims_denom_cur), None)
 
     # Total policy count = sum of Number of Policies across every NL-36
     # channel (previously only Individual Agents' count was extracted).
@@ -1899,9 +2043,9 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # Average Claim Size = Total amount of claims paid / Total no. of claims
     # paid, read directly off NL-39 (see extract_average_claim_size) -
     # current-quarter only, since NL-39 itself has no YTD/prior-year column.
-    D[(20, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
+    D[(23, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
     if reported_cur is not None and total_policies_cur:
-        D[(20, "No. of claims to No. of policies", None)] = (round(reported_cur / total_policies_cur, 6), None)
+        D[(23, "No. of claims to No. of policies", None)] = (round(reported_cur / total_policies_cur, 6), None)
 
     return D
 

@@ -593,6 +593,92 @@ def get_line_item(fp: FormPage, *label_substrings, cur_year_frag=None, prior_yea
     return cur_val, prior_val
 
 
+# Exact-match spellings (never substring - "Health" must not also match
+# "Total Health") accepted per line-of-business group, across the insurers
+# checked so far (NBHI: "Health"/"Personal Accident"/"Travel Insurance";
+# ABHI: "Health"/"Personal Accident"/"Travel"). Extend as new insurers'
+# filings turn up other spellings.
+_SEGMENT_ALIASES = {
+    "Health": {"health", "health insurance"},
+    "Personal Accident": {"personal accident", "pa"},
+    "Travel": {"travel", "travel insurance"},
+}
+
+
+def get_segment_line_item(fp: FormPage, segment, *label_substrings, cur_year_frag=None, prior_year_frag=None):
+    """Like get_line_item, but resolves the named line-of-business GROUP's
+    own column (segment="Health"/"Personal Accident"/"Travel", see
+    _SEGMENT_ALIASES) instead of the Grand Total column get_line_item always
+    walks to via _extend_to_total_column.
+
+    Group and period are two independent header axes on the same table
+    (classify_group_columns / classify_period_columns respectively) - this
+    intersects them: a column counts only if it is EXACTLY labeled with one
+    of the segment's accepted spellings AND carries a cumulative period
+    label for the target year. Both axes are searched across the table's
+    full row range regardless of which one sits above/below the other (see
+    _extend_to_total_column's docstring on this varying by insurer - e.g.
+    CARE prints the group-label row below its period-header row)."""
+    aliases = _SEGMENT_ALIASES[segment]
+    if cur_year_frag is None or prior_year_frag is None:
+        cur_year_frag, prior_year_frag = year_frags()
+    matches = fp.find_rows(*label_substrings)
+    if not matches:
+        return None, None
+    cur_val = prior_val = None
+    for row, ti, ridx in matches:
+        table = fp.tables[ti]
+        group_events = classify_group_columns(table)
+        segment_cols = {e["col"] for e in group_events
+                        if " ".join(str(e["label"]).split()).strip().lower() in aliases}
+        if not segment_cols:
+            continue
+        period_events = classify_period_columns(table, cur_year_frag, prior_year_frag)
+
+        def _resolve(period_kind):
+            # Nearest PRECEDING (row <= ridx) matching header, same rule
+            # _col_for uses - required because a stacked-blocks layout
+            # (current-year block, then prior-year block, in the same
+            # table - e.g. ABHI's NL-4) reuses the same column INDICES for
+            # both blocks, so without the row bound a later block's header
+            # would satisfy an earlier block's data row (or vice versa) and
+            # silently pick the wrong year's value out of the wrong block.
+            best_col, best_ridx = None, None
+            for e in period_events:
+                if e["col"] not in segment_cols or e["period"] != period_kind:
+                    continue
+                if e["row"] > ridx:
+                    continue
+                if best_ridx is None or e["row"] > best_ridx:
+                    best_col, best_ridx = e["col"], e["row"]
+            return best_col
+
+        cur_idx = _resolve("current_cumulative")
+        prior_idx = _resolve("prior_cumulative")
+        if cur_idx is not None and cur_idx < len(row) and (cur_val is None or cur_val == 0):
+            v = parse_num(row[cur_idx])
+            if v is not None and (cur_val is None or v != 0):
+                cur_val = v
+        if prior_idx is not None and prior_idx < len(row) and (prior_val is None or prior_val == 0):
+            v = parse_num(row[prior_idx])
+            if v is not None and (prior_val is None or v != 0):
+                prior_val = v
+    return cur_val, prior_val
+
+
+def get_segment_line_item_any(fp: FormPage, segment, label_variants, cur_year_frag=None, prior_year_frag=None):
+    """get_line_item_any's counterpart for get_segment_line_item - insurers
+    don't all use the same wording for the same line item on a segmented
+    form either (e.g. NBHI/ABHI's "Gross Direct Premium" vs ManipalCigna's
+    "Premium from direct business written")."""
+    for variant in label_variants:
+        cur, prior = get_segment_line_item(fp, segment, *variant, cur_year_frag=cur_year_frag,
+                                            prior_year_frag=prior_year_frag)
+        if cur is not None or prior is not None:
+            return cur, prior
+    return None, None
+
+
 def sum_rows_after(fp: FormPage, anchor_substrings, stop_pattern, table_idx=None,
                     cur_year_frag=None, prior_year_frag=None):
     """Sum every sub-item row's (current, prior) cumulative values nested

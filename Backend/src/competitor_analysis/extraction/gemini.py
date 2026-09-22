@@ -186,11 +186,11 @@ def master_metric_specs():
     # per-category-code rows (data_engine.extract_investment_portfolio),
     # since NL-31 already carries an IRDAI-standard category code per row.
     add("aum_total", "GRAND TOTAL of all investments (Shareholders + Policyholders, Long term + Short term) - the bottom-line total of the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(32, "AUM (Overall)", None)])
+        ["NL-12"], "money", [(35, "AUM (Overall)", None)])
     add("aum_shareholders", "Total investments attributable to the SHAREHOLDERS' fund only (Long term + Short term shareholders columns), from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(33, "AUM -Shareholders", None)])
+        ["NL-12"], "money", [(36, "AUM -Shareholders", None)])
     add("aum_policyholders", "Total investments attributable to the POLICYHOLDERS' fund only (Long term + Short term policyholders columns), from the Investment Schedule (NL-12 & 12A).",
-        ["NL-12"], "money", [(33, "AUM -Policyholders", None)])
+        ["NL-12"], "money", [(36, "AUM -Policyholders", None)])
 
     # --- NL-20 Analytical Ratios ---
     # Combined/Loss/Expense/EOM Ratios are NOT extracted from NL-20 anymore -
@@ -204,15 +204,15 @@ def master_metric_specs():
     add("solvency_ratio", "'Available Solvency Margin Ratio to Required Solvency Margin Ratio' (No. of times), from the Analytical Ratios Schedule (NL-20). "
         "Report it as a plain multiple (e.g. 1.84), never a percentage - most insurers print it as a bare number already, but if this schedule prints it "
         "suffixed with '%' (e.g. '184%'), divide by 100 before reporting (184% -> 1.84).",
-        ["NL-20"], "ratio", [(31, "Solvency Ratios", None)])
+        ["NL-20"], "ratio", [(34, "Solvency Ratios", None)])
 
     # --- NL-29 Debt Securities: rating & maturity mix (use Book Value % of total) ---
     for metric1, label in DEBT_RATINGS:
         add(f"debt_rating_{metric1}", f"'{label}' row's Book Value 'as % of total for this class' (the credit-rating breakdown percentage), from the Detail Regarding Debt Securities Schedule (NL-29). If 'Rated below A' isn't a single row, sum 'Rated below A but above B' + 'Rated Below B'.",
-            ["NL-29"], "percent", [(25, metric1, None)])
+            ["NL-29"], "percent", [(28, metric1, None)])
     for bucket in MATURITY_BUCKETS:
         add(f"debt_maturity_{bucket}", f"'{bucket}' row's Book Value 'as % of total for this class' (the residual-maturity breakdown percentage), from the Detail Regarding Debt Securities Schedule (NL-29).",
-            ["NL-29"], "percent", [(26, bucket, None)])
+            ["NL-29"], "percent", [(29, bucket, None)])
 
     # --- NL-33 Reinsurance: total premium ceded ---
     add("ri_ceded_total", "Total premium ceded to reinsurers (Upto the Quarter), from the 'Grand Total (C)' row of the Reinsurance/Retrocession Risk Concentration Schedule (NL-33). That row's total is usually split across 'Proportional' + 'Non-Proportional' + 'Facultative' sub-columns - if so, SUM those sub-column values together to get the one total figure requested here.",
@@ -265,14 +265,14 @@ def master_metric_specs():
 
     # --- NL-41 Offices Information (point-in-time; no prior-year column expected) ---
     add("employees_onroll", "No. of Employees - On-roll, from the Offices Information Schedule (NL-41).",
-        ["NL-41"], "count", [(34, "Employees", "On-roll Employee")])
+        ["NL-41"], "count", [(37, "Employees", "On-roll Employee")])
     add("agents_individual", "No. of Insurance Agents - Individual Agents, from the Offices Information Schedule (NL-41).",
-        ["NL-41"], "count", [(34, "Agents", "Individual Agents")])
+        ["NL-41"], "count", [(37, "Agents", "Individual Agents")])
     add("offices_count", "No. of branches/offices at the end of the period, from the Offices Information Schedule (NL-41).",
-        ["NL-41"], "count", [(35, "No. of Offices", None)])
+        ["NL-41"], "count", [(38, "No. of Offices", None)])
     for form_label, metric2 in INTERMEDIARIES:
         add(f"intermediary_{metric2}", f"No. of '{form_label}', from the Offices Information Schedule (NL-41).",
-            ["NL-41"], "count", [(35, "Intermediaries", metric2)])
+            ["NL-41"], "count", [(38, "Intermediaries", metric2)])
 
     return specs
 

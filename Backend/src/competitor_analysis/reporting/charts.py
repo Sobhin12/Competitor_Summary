@@ -565,11 +565,18 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
     return True
 
 
-def income_table(ax, row_labels, company_keys, values_dict, title):
+def income_table(ax, row_labels, company_keys, values_dict, title, percent_rows=None):
     """values_dict: {row_label: {company_key: value}}. Row labels are the
     table's own first column (not matplotlib's separate `rowLabels`, which
     is positioned outside the table's axes and gets clipped by the page
-    edge for a table this close to the left margin)."""
+    edge for a table this close to the left margin).
+
+    `percent_rows`, if given, is the set of row_labels (e.g. "Combined
+    Ratio") whose values are fractions to format as a whole-number percent
+    ("103.8%") instead of plain comma-grouped money ("1,822") - both shapes
+    can appear in the same table (e.g. a segment P&L with money rows above
+    ratio rows), so this is a per-row choice, not a whole-table one."""
+    percent_rows = percent_rows or set()
     present_cols = [k for k in company_keys if any(values_dict.get(r, {}).get(k) is not None for r in row_labels)]
     if not present_cols:
         return False
@@ -580,7 +587,12 @@ def income_table(ax, row_labels, company_keys, values_dict, title):
         row = [r]
         for k in present_cols:
             v = values_dict.get(r, {}).get(k)
-            row.append(f"{v:,.0f}" if isinstance(v, (int, float)) else "-")
+            if not isinstance(v, (int, float)):
+                row.append("-")
+            elif r in percent_rows:
+                row.append(f"{v * 100:.1f}%")
+            else:
+                row.append(f"{v:,.0f}")
         cell_text.append(row)
     n_cols = len(col_labels)
     col_widths = [0.28] + [0.72 / (n_cols - 1)] * (n_cols - 1)
@@ -594,7 +606,8 @@ def income_table(ax, row_labels, company_keys, values_dict, title):
             cell.set_facecolor(theme.NAVY)
             cell.set_text_props(color="white", fontweight="bold")
         elif c == 0:
-            cell.set_text_props(ha="left", fontweight="bold" if row_labels[r - 1] in ("PBT", "PAT") else "normal")
+            cell.set_text_props(ha="left", fontweight="bold" if row_labels[r - 1] in
+                                ("PBT", "PAT", "UW Profit/(Loss)") else "normal")
             cell._loc = "left"
         cell.set_edgecolor(theme.GRID_COLOR)
     ax.set_title(title, fontsize=10, fontweight="bold", loc="left", pad=6)

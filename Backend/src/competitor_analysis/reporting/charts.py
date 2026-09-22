@@ -486,6 +486,85 @@ def change_bar(ax, changes, unit="pp"):
     return True
 
 
+def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=None, unit_label="INR Crore",
+                 is_percent=False, value_fmt=None, gap=0.14, pad=0.12, stretch=0.4, colors=None):
+    """One horizontal LANE per company (stacked top-to-bottom in
+    `company_keys` order), rather than every company sharing one y-axis. A
+    shared axis flattens whichever companies are far smaller than the
+    period's leader - e.g. a fast young insurer's 3x growth is invisible
+    next to STAR's absolute scale - so within its own lane each series is
+    independently min-max normalized ((v - min) / (max - min), padded by
+    `pad` on both ends for label clearance), making every company's OWN
+    shape equally readable regardless of its neighbors' scale. The plotted
+    position is this normalized value (compressed toward the lane's
+    vertical center by `stretch` - see below); every point is still
+    labeled with its REAL value via `fmt`. `gap` (in lane-height units)
+    separates lanes so no lane's line/labels can reach into its neighbor's.
+    Companies are identified via a shared legend below the axes (report-wide
+    convention), not per-lane labels.
+
+    Plain min-max normalization always stretches a lane's min to its very
+    bottom and max to its very top, regardless of how large that range
+    actually is in real terms - a metric that only moves ~20-30%
+    peak-to-trough over 9 years (e.g. Agent Productivity) ends up looking
+    just as dramatic a zigzag as one that triples. `stretch` (0-1) pulls the
+    normalized value in toward the lane's center by that factor before
+    plotting, damping the visual amplitude uniformly; the REAL values in the
+    labels are unaffected - only the line's shape is calmed down.
+
+    `company_values`: {company_key: [value_or_None, ...]} aligned to `years`.
+    `value_fmt`, if given, overrides the default label formatter (Indian
+    lakh/crore grouping, or a whole-number percent when `is_percent`) - e.g.
+    a metric whose values are small decimals (Rs. Lakhs per agent, ~1.3)
+    needs 2 decimal places, which lakh/crore grouping's round-to-int would
+    otherwise flatten to "1" for every year.
+    `colors`, if given, overrides theme.COMPANY_COLORS per key - for a
+    non-company series (e.g. SAHI/Industry aggregates), which would
+    otherwise all fall back to the same ORANGE default and be indistinguishable.
+    Returns False (draws nothing) if every company's series is empty."""
+    fmt = value_fmt or ((lambda v: f"{v * 100:.0f}%") if is_percent else _indian_grouping)
+    pairs = [(k, company_values.get(k)) for k in company_keys
+             if company_values.get(k) and any(v is not None for v in company_values[k])]
+    if not pairs:
+        return False
+    panel_box(fig, subplot_spec, title=title, unit_label=unit_label)
+    ax = fig.add_subplot(subplot_spec)
+    x = list(range(len(years)))
+    n = len(pairs)
+    lane_h = 1.0
+    step = lane_h + gap
+    for i, (k, vals) in enumerate(pairs):
+        pts = [(xi, v) for xi, v in zip(x, vals) if v is not None]
+        if not pts:
+            continue
+        color = (colors or {}).get(k) or theme.COMPANY_COLORS.get(k, theme.ORANGE)
+        vs = [v for _, v in pts]
+        lo, hi = min(vs), max(vs)
+        span = (hi - lo) or 1.0
+        y0 = (n - 1 - i) * step  # index 0 -> topmost lane
+
+        def norm(v, lo=lo, span=span, y0=y0):
+            frac = 0.5 if hi == lo else (v - lo) / span
+            frac = 0.5 + (frac - 0.5) * stretch
+            return y0 + pad + frac * (lane_h - 2 * pad)
+
+        xs = [xi for xi, _ in pts]
+        ys = [norm(v) for _, v in pts]
+        ax.plot(xs, ys, marker="o", markersize=3.5, linewidth=1.6, color=color,
+                label=theme.COMPANY_DISPLAY_NAME.get(k, k))
+        for xi, v in pts:
+            ax.annotate(fmt(v), (xi, norm(v)), textcoords="offset points", xytext=(0, 6),
+                        ha="center", fontsize=6.5, color=theme.DARK_TEXT)
+    ax.set_xticks(x)
+    ax.set_xticklabels(years, fontsize=8)
+    ax.margins(x=0.05)
+    ax.set_ylim(-gap * 0.3, n * step - gap * 0.7)
+    ax.set_yticks([])
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.legend(fontsize=7, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=min(len(pairs), 5))
+    return True
+
+
 def income_table(ax, row_labels, company_keys, values_dict, title):
     """values_dict: {row_label: {company_key: value}}. Row labels are the
     table's own first column (not matplotlib's separate `rowLabels`, which

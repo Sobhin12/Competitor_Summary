@@ -120,6 +120,7 @@ def download_tree(prefix: str) -> None:
 def restore_all() -> None:
     """Call once at API startup, before serving requests."""
     download_tree("data/downloads")
+    download_tree("data/historical")
     download_tree("artifacts/output")
     # pdf_json only - never artifacts/cache/gemini (see module docstring).
     download_tree("artifacts/cache/pdf_json")

@@ -12,8 +12,11 @@ when there's nothing to plot, and every section function here checks that
 before deciding whether to allocate a panel for it.
 
 Known, deliberate simplifications vs. the FY25 reference deck:
-  - "Historical Trends" sections render as a 2-period (FY25_Q3 vs FY26_Q3)
-    comparison, not 8-year history - the Data Engine only carries 2 periods.
+  - Multi-year trend slides (Retail Revenue, ATS, Historical Trends (Key
+    Ratios), RI Ceded, ROE & Solvency, Asset Under Management, Distribution
+    Footprint) read from reporting.historical / data/historical/
+    Historical_Trends.xlsx - a separate, hand-maintained workbook updated
+    once a year - not the quarterly Data Engine every other slide reads.
   - The reference deck's dot/bubble "Market Share Change" mini-chart is
     replaced by a horizontal diverging bar chart (simpler, equally
     informative, easier to verify correct in a static image).
@@ -34,6 +37,7 @@ from matplotlib.lines import Line2D
 from competitor_analysis.reporting import theme
 from competitor_analysis.reporting import charts
 from competitor_analysis.reporting import data
+from competitor_analysis.reporting import historical
 from competitor_analysis import config as cfg
 from competitor_analysis import paths
 
@@ -90,13 +94,22 @@ def _header_footer(fig, title, page_no):
 
 
 def new_page(title, page_no, n_panels, height_ratios=None, want_insights=False, hspace=0.32,
-             n_insight_lines=None):
+             n_insight_lines=None, bottom=0.09):
     """Returns (fig, list_of_subplot_specs_for_panels, subplot_spec_for_insights_or_None).
 
     The insights row defaults to a fixed 0.32 height ratio (sized for
     draw_insights' 4-line cap) - pass `n_insight_lines` (the real bullet
     count, capped at 4 same as draw_insights itself) to size it to what's
-    actually there instead, so 2 short bullets don't sit in a box built for 4."""
+    actually there instead, so 2 short bullets don't sit in a box built for 4.
+
+    `bottom` (default 0.09) is normally enough clearance above the footer,
+    because want_insights=True's insights box is the last thing on the page
+    and buffers the actual chart panels from it. A page with no insights row
+    (e.g. historical_trend_page) has its last chart panel sitting directly
+    on `bottom` instead - and panel_box's own pad_bottom (reserved for a
+    chart's legend) eats further into that margin - so such callers should
+    pass a larger `bottom` to keep the panel's box/legend clear of the
+    page-number pennant in the footer."""
     fig = plt.figure(figsize=theme.PAGE_SIZE, dpi=theme.DPI)
     _header_footer(fig, title, page_no)
     total_rows = n_panels + (1 if want_insights else 0)
@@ -104,7 +117,7 @@ def new_page(title, page_no, n_panels, height_ratios=None, want_insights=False, 
     if want_insights:
         n = 4 if n_insight_lines is None else max(1, min(n_insight_lines, 4))
         ratios = ratios + [0.10 + 0.055 * n]
-    gs = fig.add_gridspec(total_rows, 1, left=0.09, right=0.94, top=0.85, bottom=0.09, hspace=hspace,
+    gs = fig.add_gridspec(total_rows, 1, left=0.09, right=0.94, top=0.85, bottom=bottom, hspace=hspace,
                            height_ratios=ratios)
     panel_specs = [gs[i] for i in range(n_panels)]
     insight_spec = gs[n_panels] if want_insights else None
@@ -213,9 +226,10 @@ def glossary_page(pdf, page_no):
         f"{cfg.cur_period_ending_str()} ({cfg.cur_period_label()}), compared to the quarter ended "
         f"{cfg.prior_period_ending_str()} ({cfg.prior_period_label()}).",
         "SAHI = Stand-alone Health Insurer. GDPI = Gross Direct Premium Income. GWP = Gross Written Premium. NWP = Net Written Premium.",
-        f"“Historical Trends” sections show a 2-period ({cfg.prior_period_label()} vs {cfg.cur_period_label()}) "
-        f"year-on-year comparison, not multi-year history - the underlying data pipeline currently carries only "
-        f"these 2 periods.",
+        "Multi-year trend slides (Retail Revenue, ATS, Historical Trends (Key Ratios), RI Ceded, ROE & Solvency, "
+        "Asset Under Management, Distribution Footprint) are sourced from a separate, hand-maintained multi-year "
+        "workbook, not the quarterly Data Engine - updated once a year, so their most recent year may lag the "
+        "current quarter's own period.",
         "Geographic zone split (North/West/South) is derived from named-state data using the standard Ministry of Home Affairs zonal convention; East and Central aren't separately identifiable from current source disclosures.",
         "Average Claim Size and No. of claims to No. of policies are best-effort estimates, not independently ground-truth-verified.",
         f"Sections with no {cfg.cur_period_label()} data for any company are omitted from this report entirely, rather than shown as an empty or placeholder chart.",
@@ -443,37 +457,83 @@ def slide_07(pdf, rows):
 # ---------------------------------------------------------------------------
 
 def slide_08(pdf, rows):
+    """Per-company GDPI panel is unchanged (Data Engine, 2-period). Adds a
+    second panel - SAHI vs Health Industry GDPI growth, multi-year - sourced
+    from reporting.historical's "GDPI Growth" table's SAHI/Industry
+    aggregate rows (not company rows, so it can't come from `data.by_company`,
+    which resolves everything through theme.canonical_company)."""
     cdata = data.by_company(rows, 8, theme.canonical_company)
     keys, prior, current = data.metric_series(cdata, "Revenue Growth (GDPI)", None)
-    if not keys:
+    bullets = []
+    if keys:
+        bullets = leader_laggard_bullets(keys, current, prior, "money", "GDPI")
+        slide_rows = data.for_slide(rows, 8)
+        for r in slide_rows:
+            if r["Company"] in ("Industry Total", "Stand-alone Health sub Total") and r["Meric 1"] == "Growth %":
+                v = data.num(r[data.CUR])
+                if v is not None:
+                    bullets.append(f"{r['Company']} growth %: {v * 100:.1f}%")
+
+    growth_table = historical.get_table("GDPI Growth")
+    growth_keys = [k for k in ("SAHI", "Industry") if growth_table and k in growth_table]
+    growth_years = growth_values = None
+    if growth_keys:
+        growth_years = historical.sorted_years(growth_table)
+        growth_values = {k: [growth_table[k].get(y) for y in growth_years] for k in growth_keys}
+
+    if not keys and not growth_keys:
         return
-    bullets = leader_laggard_bullets(keys, current, prior, "money", "GDPI")
-    slide_rows = data.for_slide(rows, 8)
-    for r in slide_rows:
-        if r["Company"] in ("Industry Total", "Stand-alone Health sub Total") and r["Meric 1"] == "Growth %":
-            v = data.num(r[data.CUR])
-            if v is not None:
-                bullets.append(f"{r['Company']} growth %: {v * 100:.1f}%")
-    fig, panels, ins = new_page("Revenue Growth (GDPI)", 8, 1, want_insights=bool(bullets),
-                                 n_insight_lines=len(bullets[:4]))
-    panel_title(fig, panels[0], "Per-company GDPI (Rs. Crore)")
-    charts.grouped_bar(fig, panels[0], disp_names(keys), prior, current)
+    n_panels = int(bool(keys)) + int(bool(growth_keys))
+    fig, panels, ins = new_page("Revenue Growth (GDPI)", 8, n_panels, want_insights=bool(bullets),
+                                 hspace=0.5, n_insight_lines=len(bullets[:4]))
+    idx = 0
+    if keys:
+        panel_title(fig, panels[idx], "Per-company GDPI (Rs. Crore)")
+        charts.grouped_bar(fig, panels[idx], disp_names(keys), prior, current)
+        idx += 1
+    if growth_keys:
+        charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
+                            title="SAHI vs Health Industry (Growth)", is_percent=True, unit_label=None,
+                            colors=theme.SEGMENT_COLORS)
     draw_insights(fig, ins, bullets[:4])
     pdf.savefig(fig)
     plt.close(fig)
 
 
 def slide_09(pdf, rows):
-    cdata = data.by_company(rows, 9, theme.canonical_company)
-    keys, _, current = data.metric_series(cdata, "SAHI Growth", "GDPI Growth SAHI")
-    if not keys:
+    """Both panels sourced from reporting.historical, not the Data Engine
+    `rows` (kept as a parameter only so SECTION_FUNCS can call every
+    slide_NN(pdf, rows) uniformly): GDPI Growth's company rows (not its
+    SAHI/Industry aggregate rows - those are slide_08's panel) as a
+    multi-year trend, plus each company's GDPI CAGR over the same table's
+    full span (FY18 through the most recent year the active period allows -
+    historical.cagr) as a single bar chart, since a CAGR is one number per
+    company, not a year-by-year series."""
+    growth_table = historical.get_table("GDPI Growth")
+    growth_keys = [k for k in data.COMPANY_ORDER if growth_table and k in growth_table]
+    growth_years = growth_values = None
+    if growth_keys:
+        growth_years = historical.sorted_years(growth_table)
+        growth_values = {k: [growth_table[k].get(y) for y in growth_years] for k in growth_keys}
+
+    gdpi_table = historical.get_table("GDPI")
+    gdpi_years = historical.sorted_years(gdpi_table) if gdpi_table else []
+    cagr_map = historical.cagr(gdpi_table) if gdpi_table else {}
+    cagr_keys = [k for k in data.COMPANY_ORDER if k in cagr_map]
+    cagr_values = [cagr_map[k] for k in cagr_keys]
+
+    if not growth_keys and not cagr_keys:
         return
-    bullets = leader_laggard_bullets(keys, current, [None] * len(keys), "percent", "GDPI growth")
-    fig, panels, ins = new_page("Revenue & Growth % (SAHI)", 9, 1, want_insights=bool(bullets),
-                                 n_insight_lines=len(bullets[:4]))
-    panel_title(fig, panels[0], "GDPI Growth % (YoY)")
-    charts.single_bar(fig, panels[0], disp_names(keys), current, is_percent=True)
-    draw_insights(fig, ins, bullets)
+    n_panels = int(bool(growth_keys)) + int(bool(cagr_keys))
+    fig, panels, _ins = new_page("Revenue & Growth % (SAHI)", 9, n_panels, hspace=0.5, bottom=0.13)
+    idx = 0
+    if growth_keys:
+        charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
+                            title="GDPI Growth % (YoY)", is_percent=True, unit_label=None)
+        idx += 1
+    if cagr_keys:
+        charts.panel_box(fig, panels[idx], title=f"GDPI CAGR ({gdpi_years[0]}-{gdpi_years[-1]})")
+        charts.single_bar(fig, panels[idx], disp_names(cagr_keys), cagr_values, is_percent=True)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -686,30 +746,28 @@ def metric_panels_page(pdf, rows, slide_no, title, page_no, panels_def, footnote
 
 
 def slide_14(pdf, rows):
-    panels = [
-        {"title": "Retail Revenue (Rs. Crore)", "metric1": "Retail Revenue", "metric2": None, "kind": "money"},
-        {"title": "Retail Accretion (Rs. Crore)", "metric1": "Retail Accretion",
-         "metric2": "Retail Revenue CY-Retail Revenue PY", "kind": "money", "mode": "single"},
-    ]
-    metric_panels_page(pdf, rows, 14, "Retail Revenue", 14, panels)
+    """Multi-year trend, sourced from reporting.historical - replaces this
+    slide's earlier 2-period cur/prior bars. `rows` unused, kept only so
+    SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
+    historical_trend_page(pdf, "Retail Revenue", 14, [
+        {"title": "Retail Health"},
+        {"title": "Retail Health Accretion"},
+    ])
 
 
 def slide_15(pdf, rows):
-    panels = [
-        # Grouped (both periods): data_engine.py computes a real prior value
-        # for this one (channel_premium/channel_policies are both extracted
-        # for cur AND prior), unlike Average Productivity below.
-        {"title": "Individual ATS (Rs. per policy)", "metric1": "Individual ATS",
-         "metric2": "Individual agents GWP/Individual agents no. of policies", "kind": "money"},
-        # Stays "single" - genuinely current-period-only, not a reporting
-        # gap: its agent-count input comes from NL-41, a point-in-time
-        # snapshot form with no prior-year column in the source filing
-        # itself (metric_specs.py's own "agents_individual ... current
-        # period only" note; see KNOWN_ISSUES.md on NL-41 more generally).
-        {"title": "Average Productivity (Rs. Lakhs per agent)", "metric1": "Average Productivity (per agent)",
-         "metric2": "Premium/No. of Individual Agents", "kind": "money", "mode": "single"},
-    ]
-    metric_panels_page(pdf, rows, 15, "ATS", 15, panels)
+    """Multi-year trend, sourced from reporting.historical - replaces this
+    slide's earlier 2-period cur/prior bars (Average Productivity in
+    particular had no real prior-period value at all: its agent-count input
+    comes from NL-41, a point-in-time snapshot form - see
+    KNOWN_ISSUES.md - so a single-period bar was always a weak picture
+    here). `rows` (the Data Engine's 2-period rows) goes unused, kept only
+    so SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
+    historical_trend_page(pdf, "ATS", 15, [
+        {"title": "ATS", "unit_label": "Rs. per policy"},
+        {"title": "Average Productivity (per agent)", "panel_title": "Average Productivity",
+         "unit_label": "Rs. Lakhs per agent", "value_fmt": lambda v: f"{v:,.2f}"},
+    ])
 
 
 STATES8 = ["Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana", "Tamil Nadu", "Kerala", "Delhi", "Others"]
@@ -956,82 +1014,60 @@ def slide_26(pdf, rows):
 
 
 # ---------------------------------------------------------------------------
-# Slides 27-31: Historical Trends (2-period comparison)
+# Slides 27-33: Historical Trends (Key Ratios) / Asset Under Management -
+# multi-year, from data/historical/Historical_Trends.xlsx. Replaces this
+# range's earlier 2-period cur/prior bars (which carried a footnote
+# apologizing for not having real multi-year history - now they do).
 # ---------------------------------------------------------------------------
 
-def _trends_note():
-    """Resolved per call: as a module constant this froze the first run's
-    quarter into every later run's footnote in the long-lived API server."""
-    return (f"Quarterly YoY comparison ({cfg.prior_period_label()} vs "
-            f"{cfg.cur_period_label()}), not multi-year history.")
-
-
 def slide_27(pdf, rows):
-    panels = [
-        {"title": "GWP (Rs. Crore)", "metric1": "GWP", "metric2": None, "kind": "money"},
-        {"title": "PBT (Rs. Crore)", "metric1": "PBT", "metric2": None, "kind": "money"},
-    ]
-    metric_panels_page(pdf, rows, 27, "Historical Trends", 27, panels, footnote=_trends_note())
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 27, [
+        {"title": "GWP"},
+        {"title": "PBT"},
+    ])
 
 
 def slide_28(pdf, rows):
-    panels = [
-        {"title": "Combined Ratio", "metric1": "Combined Ratio", "metric2": None, "kind": "percent",
-         "higher_is_better": False},
-        {"title": "Loss Ratio", "metric1": "Loss Ratio", "metric2": None, "kind": "percent",
-         "higher_is_better": False},
-    ]
-    metric_panels_page(pdf, rows, 28, "Historical Trends", 28, panels, footnote=_trends_note())
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 28, [
+        {"title": "Combined Ratio", "is_percent": True, "unit_label": None},
+        {"title": "Loss Ratio", "is_percent": True, "unit_label": None},
+    ])
 
 
 def slide_29(pdf, rows):
-    panels = [
-        {"title": "Expense Ratio", "metric1": "Expense Ratio", "metric2": None, "kind": "percent",
-         "higher_is_better": False},
-        {"title": "Expense of Management Ratio", "metric1": "Expense of Management Ratio", "metric2": None,
-         "kind": "percent", "higher_is_better": False},
-    ]
-    metric_panels_page(pdf, rows, 29, "Historical Trends", 29, panels, footnote=_trends_note())
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 29, [
+        {"title": "Expense Ratio", "is_percent": True, "unit_label": None},
+        {"title": "Expense of Management Ratio", "is_percent": True, "unit_label": None},
+    ])
 
 
 def slide_30(pdf, rows):
-    panels = [
-        {"title": "RI Ceding to GWP Ratio", "metric1": "RI Ceding to GWP Ratio", "metric2": "Risk Ceded",
-         "kind": "percent", "mode": "single"},
-        {"title": "RI Commission to RI Ceding", "metric1": "RI Commission to RI Ceding", "metric2": "Risk Ceded",
-         "kind": "percent", "mode": "single"},
-    ]
-    metric_panels_page(pdf, rows, 30, "Historical Trends", 30, panels, footnote=_trends_note())
+    historical_trend_page(pdf, "RI Ceded", 30, [
+        {"title": "RI Ceding Ratio", "is_percent": True, "unit_label": None},
+        {"title": "RI Commission to Ceding Ratio", "is_percent": True, "unit_label": None},
+    ])
 
 
 def slide_31(pdf, rows):
-    panels = [
-        {"title": "ROE (SAHI)", "metric1": "ROE (SAHI)", "metric2": "PAT/Avg. Net Worth", "kind": "percent",
-         "mode": "single"},
-        {"title": "Solvency Ratio", "metric1": "Solvency Ratios", "metric2": None, "kind": "ratio"},
-    ]
-    metric_panels_page(pdf, rows, 31, "Historical Trends", 31, panels, footnote=_trends_note())
+    historical_trend_page(pdf, "ROE & Solvency", 31, [
+        {"title": "ROE", "is_percent": True, "unit_label": None},
+        {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{v:.2f}x"},
+    ])
 
-
-# ---------------------------------------------------------------------------
-# Slides 32-33: AUM
-# ---------------------------------------------------------------------------
 
 def slide_32(pdf, rows):
-    panels = [
-        {"title": "AUM (Overall, Rs. Crore)", "metric1": "AUM (Overall)", "metric2": None, "kind": "money"},
-        {"title": "Investment Yield", "metric1": "Investment Yield", "metric2": None, "kind": "percent"},
-    ]
-    metric_panels_page(pdf, rows, 32, "Asset Under Management", 32, panels)
+    historical_trend_page(pdf, "Asset Under Management", 32, [
+        {"title": "AUM"},
+        {"title": "Investment Yield", "is_percent": True, "unit_label": None,
+         "value_fmt": lambda v: f"{v * 100:.1f}%"},
+    ])
 
 
 def slide_33(pdf, rows):
-    panels = [
-        {"title": "AUM - Policyholders (Rs. Crore)", "metric1": "AUM -Policyholders", "metric2": None,
-         "kind": "money"},
-        {"title": "AUM - Shareholders (Rs. Crore)", "metric1": "AUM -Shareholders", "metric2": None, "kind": "money"},
-    ]
-    metric_panels_page(pdf, rows, 33, "Asset Under Management", 33, panels)
+    historical_trend_page(pdf, "Asset Under Management", 33, [
+        {"title": "AUM Shareholders"},
+        {"title": "AUM Policyholders"},
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -1039,46 +1075,106 @@ def slide_33(pdf, rows):
 # ---------------------------------------------------------------------------
 
 def slide_34(pdf, rows):
-    panels = [
-        {"title": "Employees (On-roll)", "metric1": "Employees", "metric2": "On-roll Employee", "kind": "count",
-         "mode": "single"},
-        {"title": "Individual Agents", "metric1": "Agents", "metric2": "Individual Agents", "kind": "count",
-         "mode": "single"},
-    ]
-    metric_panels_page(pdf, rows, 34, "Distribution Footprint", 34, panels)
+    """Multi-year trend, sourced from reporting.historical - replaces this
+    slide's earlier current-period-only bars. `rows` unused, kept only so
+    SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
+    historical_trend_page(pdf, "Distribution Footprint", 34, [
+        {"title": "Employees", "panel_title": "Employees (On-roll)", "unit_label": "Count"},
+        {"title": "Agents", "panel_title": "Individual Agents", "unit_label": "Count"},
+    ])
 
 
 INTERMEDIARY_TYPES = ["Individual Agents", "CA-Banks", "CA-Others", "Brokers", "WA", "IMF", "POS"]
 
 
 def slide_35(pdf, rows):
+    """No. of Offices is now a multi-year trend from reporting.historical;
+    Intermediaries by type has no multi-year workbook table, so it stays on
+    the Data Engine's current-period `rows`, same as before - this slide mixes
+    both sources rather than being purely one or the other."""
+    off_table = historical.get_table("Offices")
+    off_years = off_keys = off_values = None
+    has_off = bool(off_table)
+    if has_off:
+        off_keys = [k for k in data.COMPANY_ORDER if k in off_table]
+        has_off = bool(off_keys)
+    if has_off:
+        off_years = historical.sorted_years(off_table)
+        off_values = {k: [off_table[k].get(y) for y in off_years] for k in off_keys}
+
     cdata = data.by_company(rows, 35, theme.canonical_company)
-    offices = data.pivot_metric1_only(rows, 35, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
-    if not keys:
-        return
     names = disp_names(keys)
-    off_cur = [offices.get(k, {}).get("No. of Offices", (None, None))[0] for k in keys]
     series = {t: [cdata[k].get(("Intermediaries", t), (None, None))[0] for k in keys] for t in INTERMEDIARY_TYPES}
-    has_off = any(v is not None for v in off_cur)
-    has_int = any(any(v is not None for v in vals) for vals in series.values())
+    has_int = bool(keys) and any(any(v is not None for v in vals) for vals in series.values())
+
     if not has_off and not has_int:
         return
     n_panels = int(has_off) + int(has_int)
-    bullets = leader_laggard_bullets(keys, off_cur, [None] * len(keys), "count", "office count") if has_off else []
-    fig, panels, ins = new_page("Distribution Footprint", 35, n_panels, want_insights=bool(bullets),
-                                 hspace=0.75, n_insight_lines=len(bullets))
+    # No insights row (the office trend replaces the single leader/laggard
+    # bullet this slide used to compute from a single period) - bottom=0.13
+    # keeps the last panel's legend clear of the footer, same as
+    # historical_trend_page's pages.
+    fig, panels, _ins = new_page("Distribution Footprint", 35, n_panels, hspace=0.5, bottom=0.13)
     idx = 0
     if has_off:
-        charts.panel_box(fig, panels[idx], title="No. of Offices")
-        charts.single_bar(fig, panels[idx], names, off_cur)
+        charts.trend_lines(fig, panels[idx], off_years, off_keys, off_values, title="No. of Offices",
+                            unit_label="Count")
         idx += 1
     if has_int:
         charts.panel_box(fig, panels[idx], title="Intermediaries by type")
         colors = theme.series_colors_for(INTERMEDIARY_TYPES)
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, series, colors, pct100=False)
-    draw_insights(fig, ins, bullets)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Historical trend slides (multi-year, from data/historical/Historical_Trends.xlsx)
+# ---------------------------------------------------------------------------
+
+def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
+    """Shared by every slide whose panels come from reporting.historical
+    instead of the Data Engine's 2-period rows (slide 15, slide 36, ...) -
+    fetches each of `metrics`' workbook tables, lays out one trend_lines
+    panel per table actually present (same no-data-no-placeholder rule as
+    the rest of the report), and draws the page.
+
+    `metrics`: list of dicts, each with:
+      title        - the table's title in Historical_Trends.xlsx (required)
+      panel_title  - this panel's heading (defaults to `title`)
+      unit_label   - top-right unit annotation (defaults to "INR Crore")
+      is_percent / value_fmt - forwarded to charts.trend_lines
+
+    `hspace` below ~0.34 (for 2 panels) puts adjacent panels' dashed
+    panel_box frames closer together than their own pad_bottom + pad_top
+    reserves, so the two boxes visually overlap/touch instead of leaving a
+    gap - keep it above that unless panel_box's own padding shrinks too.
+    A title with no matching table in the workbook is skipped."""
+    tables = historical.get_tables([m["title"] for m in metrics])
+    panels_data = []
+    for m in metrics:
+        table = tables.get(m["title"])
+        if not table:
+            continue
+        keys = [k for k in data.COMPANY_ORDER if k in table]
+        if not keys:
+            continue
+        years = historical.sorted_years(table)
+        values = {k: [table[k].get(y) for y in years] for k in keys}
+        panels_data.append((m, years, keys, values))
+    if not panels_data:
+        return
+    # bottom=0.13 (vs new_page's normal 0.09): this page has no insights box
+    # to buffer the last panel from the footer, and trend_lines' own legend
+    # sits inside panel_box's pad_bottom reserve just above that margin - see
+    # new_page's bottom= docstring.
+    fig, panels, _ins = new_page(page_title, page_no, len(panels_data), hspace=hspace, bottom=0.13)
+    for spec, (m, years, keys, values) in zip(panels, panels_data):
+        charts.trend_lines(fig, spec, years, keys, values, title=m.get("panel_title", m["title"]),
+                            unit_label=m.get("unit_label", "INR Crore"), is_percent=m.get("is_percent", False),
+                            value_fmt=m.get("value_fmt"))
     pdf.savefig(fig)
     plt.close(fig)
 

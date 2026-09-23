@@ -61,6 +61,26 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
             on_progress(key, percent, status)
     per_company = defaultdict(dict)  # company -> {"income_statement": s, "gemini": s}
 
+    # ---- Stage -1: reset process-lifetime state from any earlier run ----
+    # apply_income_statement_rows._cache and apply_segment_income_statement_rows
+    # ._cache are company-keyed memoization dicts, module-level so Stage 2's
+    # write and Stage 3's derived-metrics read can share one PDF parse within
+    # THIS run without re-parsing - but with no period in the key, a
+    # long-lived process (the API server) that has already extracted a
+    # company for one period leaves that period's numbers cached forever,
+    # silently reused - under the new period's label - for every later run
+    # of a DIFFERENT period. A fresh CLI process never shows this (the module
+    # re-imports every invocation), which is exactly why it only ever
+    # surfaced on the deployed server. Clearing here keeps the intra-run
+    # memoization intact while making it impossible for it to outlive the
+    # run it was built for.
+    p.apply_income_statement_rows._cache.clear()
+    p.apply_segment_income_statement_rows._cache.clear()
+    # Same class of staleness, lower stakes (nothing reads it back into the
+    # workbook, but a long-lived process would otherwise print every earlier
+    # run's column-resolution fallbacks mixed into this run's own).
+    p.RESOLUTION_LOG.clear()
+
     # ---- Stage 0: label the value columns for the period being run ----
     with phase("Phase 2 / Headers"):
         relabelled = p.sync_period_headers(ws)

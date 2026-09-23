@@ -391,7 +391,7 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
 
 
 def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=True, show_totals=False,
-                 show_yaxis=False):
+                 show_yaxis=False, raw_value_labels=False):
     """series_dict: {series_name: [value_per_category, ...]}.
 
     `show_totals`, if set, annotates each bar's own absolute total (the
@@ -400,6 +400,14 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
     the bar, in Indian lakh/crore grouping - for a pct100 chart, this is how
     a reader sees both the mix (%, inside each segment) and the underlying
     scale (the absolute total, above the bar) at once.
+
+    `raw_value_labels`, with pct100=True, keeps the normalized-height bars
+    (every category the same total height, so a category whose own total is
+    tiny next to another's isn't squashed to invisible) but labels each
+    segment with its real absolute value instead of a %-of-bar share - for a
+    metric where the categories' totals differ by orders of magnitude (e.g.
+    Individual Agents vs. Web Aggregators) and the reader needs the actual
+    counts, not just each company's proportion within that one category.
 
     `show_yaxis=False` drops the y tick labels/ticks and the left spine -
     for a pct100 chart with `value_labels` on, the % already printed inside
@@ -433,10 +441,12 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
             # label unconditionally; only the raw-value branch needs the
             # division to turn `v` into a share at all.
             labels = []
-            for v, tot in zip(vals, totals):
+            for v, tot, rv in zip(vals, totals, raw[name]):
                 share = v if pct100 else (v / tot if tot else 0)
                 if not v or share < 0.04:
                     labels.append("")
+                elif raw_value_labels:
+                    labels.append(_num_fmt(rv))
                 else:
                     labels.append(f"{v * 100:.0f}%" if pct100 else _num_fmt(v))
             ax.bar_label(bars, labels=labels, label_type="center", fontsize=6, color="white")

@@ -1156,8 +1156,16 @@ def slide_38(pdf, rows):
 
     cdata = data.by_company(rows, 38, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
-    names = disp_names(keys)
-    series = {t: [cdata[k].get(("Intermediaries", t), (None, None))[0] for k in keys] for t in INTERMEDIARY_TYPES}
+    disp = disp_names(keys)
+    # Agent type on the x-axis, one stacked segment per company (not the
+    # other way around) - counts span orders of magnitude across types
+    # (Individual Agents in the lakhs, WA/IMF in the tens), so each bar is
+    # normalized to the same height (pct100) and labelled with the real
+    # count per segment instead of a %, letting a reader see both each
+    # type's company mix and its actual scale.
+    series = {d: [cdata[k].get(("Intermediaries", t), (None, None))[0] for t in INTERMEDIARY_TYPES]
+              for k, d in zip(keys, disp)}
+    colors = {d: theme.COMPANY_COLORS.get(k, theme.ORANGE) for k, d in zip(keys, disp)}
     has_int = bool(keys) and any(any(v is not None for v in vals) for vals in series.values())
 
     if not has_off and not has_int:
@@ -1175,9 +1183,8 @@ def slide_38(pdf, rows):
         idx += 1
     if has_int:
         charts.panel_box(fig, panels[idx], title="Intermediaries by type")
-        colors = theme.series_colors_for(INTERMEDIARY_TYPES)
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, series, colors, pct100=False)
+        charts.stacked_bar(ax, INTERMEDIARY_TYPES, series, colors, pct100=True, raw_value_labels=True)
     pdf.savefig(fig)
     plt.close(fig)
 

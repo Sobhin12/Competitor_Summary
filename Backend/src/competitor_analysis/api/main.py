@@ -7,6 +7,7 @@ the UI's views did not need restructuring to consume real data.
 Run:
     uvicorn competitor_analysis.api.main:app --reload --port 8000
 """
+import asyncio
 import os
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -435,7 +436,14 @@ async def upload_downloaded_file(run_id: str, company_id: str, file: UploadFile 
     paths.ensure_parent(path)
     with open(path, "wb") as f:
         f.write(content)
-    r2.upload_file(path)
+    # r2.upload_file is a blocking network call (boto3); this endpoint is
+    # async (it awaits file.read()), so FastAPI does NOT run it in a
+    # threadpool the way it does for plain `def` endpoints - calling the
+    # blocking upload directly here would stall the single asyncio event
+    # loop for the whole PUT, which behind Render's HTTP/2 edge proxy shows
+    # up client-side as net::ERR_HTTP2_PROTOCOL_ERROR instead of a normal
+    # slow response.
+    await asyncio.to_thread(r2.upload_file, path)
     cs.retrieval_status = "done"
     cs.retrieval_progress = 100
     cs.size = len(content)
@@ -515,6 +523,9 @@ async def upload_data_engine(run_id: str, file: UploadFile = File(...)):
     paths.ensure_parent(run.data_engine_path)
     with open(run.data_engine_path, "wb") as f:
         f.write(content)
-    r2.upload_file(run.data_engine_path)
+    # See the matching comment in upload_downloaded_file: this is an async
+    # endpoint, so the blocking r2 upload must be offloaded or it stalls the
+    # event loop for the whole request.
+    await asyncio.to_thread(r2.upload_file, run.data_engine_path)
     run.log("info", f"Data Engine workbook replaced manually ({len(content)} bytes).")
     return _serialise_run(run)

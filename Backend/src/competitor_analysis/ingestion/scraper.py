@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 
 from competitor_analysis import config as cfg
 from competitor_analysis import paths
+from competitor_analysis import logging_setup
+
+log = logging_setup.get_logger(__name__)
 
 load_dotenv()
 
@@ -103,7 +106,7 @@ def load_url_patterns() -> dict:
         with open(URL_PATTERNS_FILE, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"[url-cache] Ignoring unreadable {URL_PATTERNS_FILE.name}: {e}")
+        log.warning("Ignoring unreadable %s: %s", URL_PATTERNS_FILE.name, e)
         return {}
 
 
@@ -120,9 +123,9 @@ def save_url_pattern(company_key: str, url: str, cal_data: dict, quarter: str):
         paths.ensure(URL_PATTERNS_FILE.parent)
         with open(URL_PATTERNS_FILE, "w") as f:
             json.dump(patterns, f, indent=2, sort_keys=True)
-        print(f"[{company_key}] Cached URL pattern -> {template}")
+        log.info("[%s] Cached URL pattern -> %s", company_key, template)
     except OSError as e:
-        print(f"[{company_key}] Could not write URL pattern cache: {e}")
+        log.warning("[%s] Could not write URL pattern cache: %s", company_key, e)
 
 
 # Query-string markers of a pre-signed, single-file, time-limited URL (Azure
@@ -335,8 +338,8 @@ async def resolve_download_url(
         source_policy={"include_domains": [domain]},
     )
     budget = PROCESSOR_TIMEOUTS.get(processor, DEFAULT_PROCESSOR_TIMEOUT)
-    print(f"[{company_key}] Task submitted (run_id={task_run.run_id}, "
-          f"processor={processor}, budget={budget}s), waiting for result...")
+    log.info("[%s] Task submitted (run_id=%s, processor=%s, budget=%ds), waiting for result...",
+              company_key, task_run.run_id, processor, budget)
 
     # Bound the wait twice over: the SDK's own api_timeout, plus an outer
     # wait_for so a call that ignores or exceeds it still can't stall the
@@ -349,10 +352,11 @@ async def resolve_download_url(
     content = result.output.content
 
     if not content.get("found") or not content.get("download_url"):
-        print(f"[{company_key}] Agent did not find a matching {file_type}. Notes: {content.get('notes')}")
+        log.warning("[%s] Agent did not find a matching %s. Notes: %s",
+                    company_key, file_type, content.get("notes"))
         return None, file_type
 
-    print(f"[{company_key}] Found: {content.get('document_title')!r} -> {content['download_url']}")
+    log.info("[%s] Found: %r -> %s", company_key, content.get("document_title"), content["download_url"])
     return content, file_type
 
 
@@ -432,12 +436,12 @@ def validate_document(path: Path, ext: str, cal_data: dict, company_key: str) ->
     try:
         text = extract_lead_text(path, ext)
     except Exception as e:
-        print(f"[validate] Could not read {path.name} to verify it: {e}")
+        log.warning("[validate] Could not read %s to verify it: %s", path.name, e)
         return True  # don't block on a parser issue we can't attribute to content
 
     if not _mentions_period(text, cal_data):
-        print(f"[{company_key}] Rejected {path.name}: does not state the period "
-              f"{cal_data['month']} {cal_data['year']}.")
+        log.warning("[%s] Rejected %s: does not state the period %s %s.",
+                    company_key, path.name, cal_data["month"], cal_data["year"])
         return False
 
     # The GIC workbook is a statistics table, not a disclosure bundle, so the
@@ -446,9 +450,9 @@ def validate_document(path: Path, ext: str, cal_data: dict, company_key: str) ->
         return True
 
     if not _FORM_NL_RE.search(text):
-        print(f"[{company_key}] Rejected {path.name}: no 'FORM NL-n' schedule "
-              f"in the first {VALIDATION_PAGES} pages, so this is not an IRDAI "
-              f"public disclosure (wrong document, right date).")
+        log.warning("[%s] Rejected %s: no 'FORM NL-n' schedule in the first %d pages, "
+                    "so this is not an IRDAI public disclosure (wrong document, right date).",
+                    company_key, path.name, VALIDATION_PAGES)
         return False
     return True
 
@@ -472,17 +476,17 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
                 resp = await http_client.get(download_url)
                 resp.raise_for_status()
             except httpx.HTTPError as e:
-                print(f"[{company_key}] Download error on attempt {attempt}/2: {e}")
+                log.warning("[%s] Download error on attempt %d/2: %s", company_key, attempt, e)
                 if attempt == 2:
                     return None
                 await asyncio.sleep(2)
                 continue
 
             if not resp.content.startswith(magic):
-                print(
-                    f"[{company_key}] Response did not look like a {file_type} "
-                    f"(content-type={resp.headers.get('content-type')}); likely a WAF "
-                    f"challenge or wrong link. Attempt {attempt}/2."
+                log.warning(
+                    "[%s] Response did not look like a %s (content-type=%s); likely a WAF "
+                    "challenge or wrong link. Attempt %d/2.",
+                    company_key, file_type, resp.headers.get("content-type"), attempt,
                 )
                 if attempt == 2:
                     return None
@@ -493,15 +497,15 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
                 await f.write(resp.content)
 
             if not validate_document(dest, ext, cal_data, company_key):
-                print(f"[{company_key}] Discarded {file_type} from {download_url} "
-                      f"(attempt {attempt}/2).")
+                log.warning("[%s] Discarded %s from %s (attempt %d/2).",
+                            company_key, file_type, download_url, attempt)
                 dest.unlink(missing_ok=True)
                 if attempt == 2:
                     return None
                 await asyncio.sleep(2)
                 continue
 
-            print(f"[{company_key}] Saved -> {dest}")
+            log.info("[%s] Saved -> %s", company_key, dest)
             return dest
 
     return None
@@ -554,7 +558,7 @@ async def search_fallback(company_key: str, cal_data: dict, quarter: str, file_t
             f"{company_key} {quarter} FY {cfg.fy_label(fy)} public disclosure pdf",
         ]
 
-    print(f"[{company_key}] Querying Search API...")
+    log.info("[%s] Querying Search API...", company_key)
     result = await asyncio.wait_for(
         client.search(objective=objective, search_queries=queries),
         timeout=SEARCH_TIMEOUT_SECONDS,
@@ -565,7 +569,7 @@ async def search_fallback(company_key: str, cal_data: dict, quarter: str, file_t
     # cover when the Task agent, restricted to the seed domain, can't resolve it.
     # download_file's magic-bytes + validate_period checks do the real filtering.
     candidates = [r.url for r in result.results[:8]]
-    print(f"[{company_key}] Search candidates: {candidates}")
+    log.info("[%s] Search candidates: %s", company_key, candidates)
     return candidates
 
 
@@ -596,7 +600,7 @@ async def try_candidates_concurrently(company_key: str, candidate_urls: list[str
                 company_key, cand, file_type, target_dir, referer=referer,
                 cal_data=cal_data, dest_name=f".{final_name}.cand{i}")
         except Exception as e:
-            print(f"[{company_key}] Candidate {cand} errored: {e}")
+            log.warning("[%s] Candidate %s errored: %s", company_key, cand, e)
             return None
 
     results = await asyncio.gather(
@@ -615,7 +619,7 @@ async def try_candidates_concurrently(company_key: str, candidate_urls: list[str
     path, cand = winner
     final = target_dir / final_name
     path.replace(final)
-    print(f"[{company_key}] Saved -> {final} (from {cand})")
+    log.info("[%s] Saved -> %s (from %s)", company_key, final, cand)
     return final
 
 
@@ -639,8 +643,8 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
     dest = target_dir / final_name
     if dest.exists():
         record("already-downloaded")
-        print(f"[{company_key}] {final_name} already present for {quarter} {fy} "
-              f"- retrieval done, skipping agent dispatch.")
+        log.info("[%s] %s already present for %s %s - retrieval done, skipping agent dispatch.",
+                  company_key, final_name, quarter, fy)
         return
 
     # ---- Step 1: cheap deterministic attempts, before any agent is billed ----
@@ -655,13 +659,14 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
         direct_urls.extend(render_url_template(cached, cal_data, quarter))
 
     if direct_urls:
-        print(f"\n[{company_key}] Trying {len(direct_urls)} direct URL(s) before dispatching an agent...")
+        log.info("[%s] Trying %d direct URL(s) before dispatching an agent...",
+                  company_key, len(direct_urls))
         dest = await try_candidates_concurrently(
             company_key, direct_urls, file_type, target_dir, referer=url, cal_data=cal_data)
         if dest is not None:
             record("direct-url", "gic-pattern" if is_gic else "cached-pattern")
             return
-        print(f"[{company_key}] No direct URL worked; falling back to the agent.")
+        log.info("[%s] No direct URL worked; falling back to the agent.", company_key)
 
     ladder = ladder_for(data)
 
@@ -690,7 +695,7 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
     searched = False
     if RACE_SEARCH_WITH_FIRST_PROCESSOR and ladder:
         searched = True
-        print(f"\n[{company_key}] Racing processor {ladder[0]!r} against the Search API...")
+        log.info("[%s] Racing processor %r against the Search API...", company_key, ladder[0])
         proc_task = asyncio.create_task(
             run_processor(ladder[0], None, dest_name=f".{final_name}.agent"))
         search_task = asyncio.create_task(run_search())
@@ -703,7 +708,7 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
                     try:
                         outcome = task.result()
                     except Exception as e:
-                        print(f"[{company_key}] {labels[task]} failed: {e}")
+                        log.warning("[%s] %s failed: %s", company_key, labels[task], e)
                         continue
                     path = outcome[0] if isinstance(outcome, tuple) else outcome
                     if path is not None:
@@ -713,7 +718,7 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
                             # Promote the agent branch's temp file now that it
                             # has won uncontested.
                             path.replace(target_dir / final_name)
-                            print(f"[{company_key}] Saved -> {target_dir / final_name}")
+                            log.info("[%s] Saved -> %s", company_key, target_dir / final_name)
                             save_url_pattern(company_key, outcome[1]["download_url"], cal_data, quarter)
                         record(labels[task])
                         return
@@ -730,16 +735,16 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
 
     # ---- Step 3: remaining processors, escalating ----
     for attempt, processor in enumerate(ladder, start=1):
-        print(f"\n[{company_key}] Dispatching Parallel AI agent -> {url} "
-              f"(processor {processor}, {attempt}/{len(ladder)})")
+        log.info("[%s] Dispatching Parallel AI agent -> %s (processor %s, %d/%d)",
+                  company_key, url, processor, attempt, len(ladder))
         try:
             path, content = await run_processor(processor, feedback)
         except asyncio.TimeoutError:
-            print(f"[{company_key}] Processor {processor} exceeded its "
-                  f"{PROCESSOR_TIMEOUTS.get(processor, DEFAULT_PROCESSOR_TIMEOUT)}s budget; escalating.")
+            log.warning("[%s] Processor %s exceeded its %ds budget; escalating.",
+                        company_key, processor, PROCESSOR_TIMEOUTS.get(processor, DEFAULT_PROCESSOR_TIMEOUT))
             continue
         except Exception as e:
-            print(f"[{company_key}] Agent task failed: {e}")
+            log.error("[%s] Agent task failed: %s", company_key, e)
             continue
         if path is not None:
             save_url_pattern(company_key, content["download_url"], cal_data, quarter)
@@ -753,14 +758,14 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
         try:
             dest = await run_search()
         except Exception as e:
-            print(f"[{company_key}] Search fallback failed: {e}")
+            log.warning("[%s] Search fallback failed: %s", company_key, e)
             dest = None
         if dest is not None:
             record("search")
             return
 
     record("failed")
-    print(f"[{company_key}] Giving up — no valid {file_type} could be located or downloaded.")
+    log.error("[%s] Giving up - no valid %s could be located or downloaded.", company_key, file_type)
 
 
 def _retry_feedback(content: dict, cal_data: dict) -> str:
@@ -777,13 +782,13 @@ def _retry_feedback(content: dict, cal_data: dict) -> str:
 
 
 async def main(fy: str, quarter: str, companies: list[str] | None = None):
-    print(f"Starting Phase 1 Agentic Retrieval for {quarter} {fy}...\n")
+    log.info("Starting Phase 1 Agentic Retrieval for %s %s...", quarter, fy)
     sources = load_sources()
     if companies is not None:
         selected = set(companies)
         unknown = selected - set(sources)
         if unknown:
-            print(f"[main] Ignoring unknown company key(s): {sorted(unknown)}")
+            log.warning("Ignoring unknown company key(s): %s", sorted(unknown))
         sources = {k: v for k, v in sources.items() if k in selected}
     target_dir = ensure_download_dir(fy, quarter)
 
@@ -795,21 +800,22 @@ async def main(fy: str, quarter: str, companies: list[str] | None = None):
     # Which route actually won, per company. Read this over a few quarters to
     # decide whether a processor still earns its place in the ladder - anything
     # that never appears here is pure cost and latency.
-    print(f"\n=== Phase 1 retrieval summary ({elapsed:.1f}s wall clock) ===")
-    print(f"{'Company':<22}{'Resolved by':<22}{'Detail':<18}{'Seconds':>8}")
+    summary_lines = [f"{'Company':<22}{'Resolved by':<22}{'Detail':<18}{'Seconds':>8}"]
     for company_key in sources:
         info = ATTEMPT_LOG.get(company_key, {"method": "not run", "detail": "", "seconds": 0.0})
-        print(f"{company_key:<22}{info['method']:<22}{info['detail']:<18}{info['seconds']:>8.1f}")
+        summary_lines.append(f"{company_key:<22}{info['method']:<22}{info['detail']:<18}{info['seconds']:>8.1f}")
+    log.info("Phase 1 retrieval summary (%.1fs wall clock):\n%s", elapsed, "\n".join(summary_lines))
 
     by_method = Counter(i["method"] for i in ATTEMPT_LOG.values())
-    print("\nBy route: " + ", ".join(f"{m}={n}" for m, n in sorted(by_method.items())))
+    log.info("By route: %s", ", ".join(f"{m}={n}" for m, n in sorted(by_method.items())))
     failed = [c for c, i in ATTEMPT_LOG.items() if i["method"] == "failed"]
     if failed:
-        print(f"FAILED ({len(failed)}): {', '.join(failed)}")
-    print(f"\nPhase 1 Agentic Execution Complete.")
+        log.warning("FAILED (%d): %s", len(failed), ", ".join(failed))
+    log.info("Phase 1 Agentic Execution Complete.")
 
 
 if __name__ == "__main__":
+    logging_setup.configure()
     TARGET_FY = "FY25-26"
     TARGET_QUARTER = "Q3"
     asyncio.run(main(TARGET_FY, TARGET_QUARTER))

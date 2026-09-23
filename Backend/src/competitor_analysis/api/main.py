@@ -15,10 +15,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from competitor_analysis import config as cfg
+from competitor_analysis import logging_setup
 from competitor_analysis import paths
 from competitor_analysis.api import runs as runs_mod
 from competitor_analysis.api.runs import REGISTRY
 from competitor_analysis.storage import r2
+
+logging_setup.configure()
 
 app = FastAPI(
     title="Competitor Analysis API",
@@ -407,7 +410,7 @@ def delete_downloaded_file(run_id: str, company_id: str):
     cs.retrieval_progress = 0
     cs.size = None
     cs.tier = None
-    run.log("warn", f"{cs.name}: downloaded file removed for review.")
+    run.log("warning", f"{cs.name}: downloaded file removed for review.")
     return _serialise_run(run)
 
 
@@ -437,7 +440,7 @@ async def upload_downloaded_file(run_id: str, company_id: str, file: UploadFile 
     cs.retrieval_progress = 100
     cs.size = len(content)
     cs.tier = "manual"
-    run.log("success", f"{cs.name}: file uploaded manually for review ({len(content)} bytes).")
+    run.log("info", f"{cs.name}: file uploaded manually for review ({len(content)} bytes).")
     return _serialise_run(run)
 
 
@@ -513,5 +516,5 @@ async def upload_data_engine(run_id: str, file: UploadFile = File(...)):
     with open(run.data_engine_path, "wb") as f:
         f.write(content)
     r2.upload_file(run.data_engine_path)
-    run.log("success", f"Data Engine workbook replaced manually ({len(content)} bytes).")
+    run.log("info", f"Data Engine workbook replaced manually ({len(content)} bytes).")
     return _serialise_run(run)

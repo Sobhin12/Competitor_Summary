@@ -32,6 +32,9 @@ from competitor_analysis.extraction.schemas import (
     ExtractedValue, CHANNELS_36, DEBT_RATINGS, MATURITY_BUCKETS, STATES, STATES8_NAMED, INTERMEDIARIES,
 )
 from competitor_analysis import paths
+from competitor_analysis import logging_setup
+
+log = logging_setup.get_logger(__name__)
 
 # Closing day of each quarter-end month, for phrasing the reporting period in
 # the extraction prompt (all four are 30/31, no February case arises).
@@ -369,7 +372,7 @@ def _cache_lookup(company, payload, metric_specs):
         with open(path, "r", encoding="utf-8") as f:
             cached = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"  ! Ignoring unreadable Gemini cache entry {path}: {e}")
+        log.warning("Ignoring unreadable Gemini cache entry %s: %s", path, e)
         return None
     CACHE_STATS["hit"] += 1
     return cached
@@ -398,7 +401,7 @@ def _write_cache_entry(path, out):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=1)
     except OSError as e:
-        print(f"  ! Could not write Gemini cache entry: {e}")
+        log.warning("Could not write Gemini cache entry: %s", e)
 
 
 class MetricValidationError(Exception):
@@ -578,8 +581,8 @@ async def _call_with_retry(company, payload, batch, limiter, max_attempts=5):
             # given enough tries - a temperature=0 call repeating the exact
             # same malformed answer 4 more times would just waste quota).
             if attempt == 0:
-                print(f"  . {company}: {len(e.invalid_keys)} metric(s) failed validation, "
-                      f"retrying once: {', '.join(e.invalid_keys)}")
+                log.info("%s: %d metric(s) failed validation, retrying once: %s",
+                          company, len(e.invalid_keys), ", ".join(e.invalid_keys))
                 continue  # not a quota condition - no backoff delay needed
             # Still invalid after that one retry: unlike an exhausted 429 (a
             # transient/quota condition where retrying harder might have
@@ -588,8 +591,8 @@ async def _call_with_retry(company, payload, batch, limiter, max_attempts=5):
             # change the model's answer - isolate the failure to just the
             # offending key(s) instead of discarding every valid sibling
             # metric in the batch too.
-            print(f"  ! {company}: {len(e.invalid_keys)} metric(s) still invalid after retry, "
-                  f"marking unresolved: {', '.join(e.invalid_keys)}")
+            log.warning("%s: %d metric(s) still invalid after retry, marking unresolved: %s",
+                        company, len(e.invalid_keys), ", ".join(e.invalid_keys))
             out = dict(e.partial_out)
             for k in e.invalid_keys:
                 out[k] = {"fy26_q3": None, "fy25_q3": None, "found": False,
@@ -611,8 +614,8 @@ async def _call_with_retry(company, payload, batch, limiter, max_attempts=5):
                 # for minutes. Back off harder when the server is the problem.
                 delay = max(delay, min(60.0, 5.0 * 2 ** attempt))
                 reason = f"transient {getattr(e, 'status', None) or 'server error'}"
-            print(f"  . {company}: {reason}, retrying in {delay:.0f}s "
-                  f"(attempt {attempt + 2}/{max_attempts})")
+            log.info("%s: %s, retrying in %.0fs (attempt %d/%d)",
+                      company, reason, delay, attempt + 2, max_attempts)
             await asyncio.sleep(delay)
 
 
@@ -688,7 +691,7 @@ async def extract_many_companies_async(jobs, metric_specs, batch_size=DEFAULT_BA
                 prompt_name, pdf_path, metric_specs, batch_size, all_forms,
                 semaphore, limiter)
         except Exception as e:
-            print(f"  ! Gemini extraction failed for {company_key}: {e}")
+            log.error("Gemini extraction failed for %s: %s", company_key, e)
             return company_key, {}
         finally:
             # Reported as each company lands rather than after the gather, so

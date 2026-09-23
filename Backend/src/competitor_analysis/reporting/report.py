@@ -40,6 +40,9 @@ from competitor_analysis.reporting import data
 from competitor_analysis.reporting import historical
 from competitor_analysis import config as cfg
 from competitor_analysis import paths
+from competitor_analysis import logging_setup
+
+log = logging_setup.get_logger(__name__)
 
 NUMFMT_PCT = {"percent"}
 
@@ -1249,6 +1252,20 @@ SECTION_FUNCS = [slide_03, slide_04, slide_05, slide_06, slide_07, slide_08, sli
 
 
 def build(out_path=None, data_engine_path=None):
+    # Every caption in this module (cur_period_label()/prior_period_label(),
+    # the TOC, every slide title) reads the live cfg.FY/cfg.QUARTER globals -
+    # never data_engine_path itself. If a caller renders a Data Engine file
+    # without cfg pointed at THAT file's own period (a stale reference held
+    # across a pause-for-review, a re-render, anything that skipped
+    # re-confirming the period first), the PDF comes out with correct
+    # numbers under the wrong period's labels and nothing raises an error.
+    # Self-correct from the file's own name whenever it's parseable, rather
+    # than trusting the caller.
+    parsed_period = cfg.parse_period_from_data_engine_path(data_engine_path)
+    if parsed_period and parsed_period != (cfg.FY, cfg.QUARTER):
+        log.warning("cfg was set to %s %s, but %r is a %s %s file - correcting before rendering.",
+                    cfg.FY, cfg.QUARTER, data_engine_path, *parsed_period)
+        cfg.set_period(*parsed_period)
     out_path = out_path or cfg.output_pdf_path()
     rows = data.load_rows(data_engine_path)
     paths.ensure_parent(out_path)
@@ -1258,9 +1275,10 @@ def build(out_path=None, data_engine_path=None):
         for fn in SECTION_FUNCS:
             fn(pdf, rows)
         glossary_page(pdf, 39)
-    print(f"Saved {out_path}")
+    log.info("Saved %s", out_path)
     return out_path
 
 
 if __name__ == "__main__":
+    logging_setup.configure()
     build()

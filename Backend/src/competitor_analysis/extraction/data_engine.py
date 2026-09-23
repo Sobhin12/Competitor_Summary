@@ -29,6 +29,7 @@ import sys
 
 import openpyxl
 
+from competitor_analysis import logging_setup
 from competitor_analysis.extraction.forms import (COMPANY_PDFS, get_form_page, get_line_item, get_line_item_any,
                           get_form_text, get_line_item_from_text, sum_rows_after,
                           get_segment_line_item, get_segment_line_item_any,
@@ -40,6 +41,8 @@ from competitor_analysis.extraction import schemas
 from competitor_analysis import config as cfg
 from competitor_analysis import memory
 from competitor_analysis import paths
+
+log = logging_setup.get_logger(__name__)
 
 XLSX_PATH = str(paths.DATA_ENGINE_WORKBOOK)
 
@@ -137,9 +140,9 @@ def audit(ws):
         if d[CUR] is None or d[PRIOR] is None:
             total_missing += 1
             missing_by_company[d["Company"]] += 1
-    print(f"Total missing rows: {total_missing}")
+    log.info("Total missing rows: %d", total_missing)
     for k, v in missing_by_company.most_common():
-        print(f"  {k}: {v}")
+        log.info("  %s: %d", k, v)
 
 
 def clear_period_values(ws):
@@ -429,8 +432,8 @@ def build_gic_lookups(gic: GicData):
     for metric2, gic_col in seg_metric2_map.items():
         actual = seg_col_by_norm.get(_norm_seg(gic_col))
         if actual is None:
-            print(f"  ! Slide 3: no Segmentwise column matches {metric2!r} "
-                  f"(sheet columns: {seg_cols}) - leaving row unwritten.")
+            log.warning("Slide 3: no Segmentwise column matches %r (sheet columns: %s) - "
+                        "leaving row unwritten.", metric2, seg_cols)
             continue
         cur = get(seg, "Industry Total", actual, "cur")
         prev = get(seg, "Industry Total", actual, "prev")
@@ -748,8 +751,8 @@ def nl36_for(company_short):
         pdf = COMPANY_PDFS.get(company_short)
         data = pdf_extract_nl36(pdf) if pdf else None
         if data is None:
-            print(f"  ! NL-36: extraction failed for {company_short} - "
-                  f"Slide 8/12 rows for this company will be left unwritten.")
+            log.warning("NL-36: extraction failed for %s - "
+                        "Slide 8/12 rows for this company will be left unwritten.", company_short)
         _NL36_CACHE[company_short] = data
     return _NL36_CACHE[company_short]
 
@@ -1488,7 +1491,7 @@ def apply_income_statement_rows(ws, dry_run=False):
             continue
         cache = apply_income_statement_rows._cache
         if company not in cache:
-            print(f"  extracting Income Statement for {company} ...")
+            log.info("extracting Income Statement for %s ...", company)
             cache[company] = extract_income_statement(company, COMPANY_PDFS[company])
         vals = cache[company].get(metric1)
         if vals is None:
@@ -1631,7 +1634,7 @@ def apply_segment_income_statement_rows(ws, slide_no, segment, dry_run=False):
         cache = apply_segment_income_statement_rows._cache
         cache_key = (company, segment)
         if cache_key not in cache:
-            print(f"  extracting {segment} income statement for {company} ...")
+            log.info("extracting %s income statement for %s ...", segment, company)
             cache[cache_key] = extract_segment_income_statement(company, COMPANY_PDFS[company], segment)
         vals = cache[cache_key].get(metric1)
         if vals is None:
@@ -2164,7 +2167,11 @@ def prefetch_income_statements(companies, max_workers=PDF_PARSE_MAX_WORKERS,
 
     errors = {}
     with ThreadPoolExecutor(max_workers=min(max_workers, len(todo))) as pool:
-        futures = [pool.submit(one, c) for c in todo]
+        # submit_with_phase, not pool.submit: a plain ThreadPoolExecutor does
+        # not copy the calling contextvars Context into its worker threads,
+        # so a bare pool.submit(one, c) would log with whatever phase is
+        # active at process start rather than the caller's "Phase 2 / ..."
+        futures = [logging_setup.submit_with_phase(pool, one, c) for c in todo]
         # as_completed, not pool.map: map yields in submission order, so a
         # company that finished early would not be reported until every
         # company queued ahead of it had also finished - which is what made
@@ -2175,7 +2182,7 @@ def prefetch_income_statements(companies, max_workers=PDF_PARSE_MAX_WORKERS,
             apply_income_statement_rows._cache[company] = result
             if error:
                 errors[company] = error
-                print(f"  ! {company}: skipped - {error}")
+                log.warning("%s: skipped - %s", company, error)
             if on_company_done is not None:
                 on_company_done(company)
             if not cancelled and should_cancel is not None and should_cancel():
@@ -2201,9 +2208,8 @@ def prefetch_gemini_metrics(companies, on_company_done=None, should_cancel=None)
     specs = gemini_extract.master_metric_specs()
     jobs = [(c, COMPANY_FULL_NAME[c], gemini_extract.COMPANY_PDFS[c]) for c in companies]
     n_batches = -(-len(specs) // gemini_extract.DEFAULT_BATCH_SIZE)
-    print(f"[Gemini]          prefetching {len(specs)} metrics x {len(jobs)} companies "
-          f"({n_batches * len(jobs)} calls, up to "
-          f"{gemini_extract.MAX_CONCURRENT_GEMINI} concurrent)...")
+    log.info("prefetching %d metrics x %d companies (%d calls, up to %d concurrent)...",
+              len(specs), len(jobs), n_batches * len(jobs), gemini_extract.MAX_CONCURRENT_GEMINI)
     coro = gemini_extract.extract_many_companies_async(
         jobs, specs, all_forms=gemini_extract.ALL_FORMS, on_company_done=on_company_done)
     if should_cancel is not None:
@@ -2225,7 +2231,7 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
     # when this function is driven directly from the CLI).
     raw = apply_company_gemini_pipeline._raw_cache.pop(company, None)
     if raw is None:
-        print(f"  fetching Gemini metrics for {company} ({len(specs)} metrics)...")
+        log.info("fetching Gemini metrics for %s (%d metrics)...", company, len(specs))
         raw = gemini_extract.extract_company_metrics(
             full_name, pdf_path, specs, all_forms=gemini_extract.ALL_FORMS)
 
@@ -2341,6 +2347,7 @@ def write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived):
 
 
 def main():
+    logging_setup.configure()
     ap = argparse.ArgumentParser()
     ap.add_argument("--audit", action="store_true")
     ap.add_argument("--gic", action="store_true")
@@ -2363,41 +2370,42 @@ def main():
         gic = GicData()
         lookups = build_gic_lookups(gic)
         updated, skipped = apply_gic_rows(ws, lookups, dry_run=args.dry_run)
-        print(f"GIC pass: matched {updated} rows, {len(skipped)} unmatched (left blank).")
+        log.info("GIC pass: matched %d rows, %d unmatched (left blank).", updated, len(skipped))
         if skipped:
-            print("Unmatched keys (first 40):")
+            log.info("Unmatched keys (first 40):")
             for r, k in skipped[:40]:
-                print(f"  row {r}: {k}")
+                log.info("  row %s: %s", r, k)
         if not args.dry_run:
             wb.save(XLSX_PATH)
-            print(f"Saved {XLSX_PATH}")
+            log.info("Saved %s", XLSX_PATH)
         return
 
     if args.fix_conventions:
         gic = GicData()
         lookups = build_gic_lookups(gic)
         updated, skipped = apply_gic_rows(ws, lookups, dry_run=args.dry_run, force=True)
-        print(f"GIC re-derive pass (forced): matched {updated} rows, {len(skipped)} unmatched.")
-        written, log = fix_slide8_and_slide12(ws, gic, dry_run=args.dry_run)
-        print(f"Slide 8/12 fix pass: wrote {written} cell-pairs, {len(log)} unmatched sheet targets.")
-        if log:
-            for item in log[:20]:
-                print(f"    {item}")
+        log.info("GIC re-derive pass (forced): matched %d rows, %d unmatched.", updated, len(skipped))
+        written, fix_log = fix_slide8_and_slide12(ws, gic, dry_run=args.dry_run)
+        log.info("Slide 8/12 fix pass: wrote %d cell-pairs, %d unmatched sheet targets.",
+                  written, len(fix_log))
+        if fix_log:
+            for item in fix_log[:20]:
+                log.info("    %s", item)
         if not args.dry_run:
             wb.save(XLSX_PATH)
-            print(f"Saved {XLSX_PATH}")
+            log.info("Saved %s", XLSX_PATH)
         return
 
     if args.income_statement:
         updated, skipped = apply_income_statement_rows(ws, dry_run=args.dry_run)
-        print(f"Income statement pass: matched {updated} rows, {len(skipped)} unmatched.")
+        log.info("Income statement pass: matched %d rows, %d unmatched.", updated, len(skipped))
         if skipped:
-            print("Unmatched (first 40):")
+            log.info("Unmatched (first 40):")
             for r, company, metric1, reason in skipped[:40]:
-                print(f"  row {r}: {company} / {metric1} -> {reason}")
+                log.info("  row %s: %s / %s -> %s", r, company, metric1, reason)
         if not args.dry_run:
             wb.save(XLSX_PATH)
-            print(f"Saved {XLSX_PATH}")
+            log.info("Saved %s", XLSX_PATH)
         return
 
     if args.gemini_metrics:
@@ -2405,23 +2413,25 @@ def main():
         total_written = 0
         all_raw = {}
         for company in companies:
-            written, log, raw = apply_company_gemini_pipeline(ws, company, dry_run=args.dry_run)
+            written, apply_log, raw = apply_company_gemini_pipeline(ws, company, dry_run=args.dry_run)
             total_written += written
             all_raw[company] = raw
             not_found = sum(1 for v in raw.values() if not v["found"])
-            print(f"  {company}: wrote {written} cell-pairs, {not_found}/{len(raw)} metrics not found in source.")
-            if log:
-                print(f"    unmatched sheet targets (first 10 of {len(log)}):")
-                for item in log[:10]:
-                    print(f"      {item}")
-        print(f"Gemini metrics pass: {total_written} cell-pairs written across {len(companies)} companies.")
+            log.info("%s: wrote %d cell-pairs, %d/%d metrics not found in source.",
+                      company, written, not_found, len(raw))
+            if apply_log:
+                log.info("    unmatched sheet targets (first 10 of %d):", len(apply_log))
+                for item in apply_log[:10]:
+                    log.info("      %s", item)
+        log.info("Gemini metrics pass: %d cell-pairs written across %d companies.",
+                  total_written, len(companies))
         if not args.dry_run:
             wb.save(XLSX_PATH)
-            print(f"Saved {XLSX_PATH}")
+            log.info("Saved %s", XLSX_PATH)
         else:
             with open("gemini_raw_dump.json", "w") as f:
                 json.dump(all_raw, f, indent=2)
-            print("Dry run - raw Gemini results saved to gemini_raw_dump.json for review.")
+            log.info("Dry run - raw Gemini results saved to gemini_raw_dump.json for review.")
         return
 
     ap.print_help()

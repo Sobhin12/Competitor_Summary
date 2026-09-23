@@ -23,6 +23,10 @@ import os
 import sys
 
 from competitor_analysis import config as cfg
+from competitor_analysis import logging_setup
+from competitor_analysis.logging_setup import phase
+
+log = logging_setup.get_logger(__name__)
 
 
 def parse_args():
@@ -45,13 +49,15 @@ def print_availability(fy: str, quarter: str) -> dict:
     """Logs (and returns) which source files are actually on disk. Purely a
     filesystem check, so it reflects hand-supplied files too."""
     avail = cfg.source_availability(fy, quarter)
-    print(f"--- Source availability for {fy} {quarter} ({avail['download_dir']}) ---")
-    print(f"GIC.xlsx: {'found' if avail['gic_found'] else 'NOT FOUND - Slides 3-11/14 will be skipped'}")
+    log.info("Source availability for %s %s (%s)", fy, quarter, avail["download_dir"])
+    if avail["gic_found"]:
+        log.info("GIC.xlsx: found")
+    else:
+        log.warning("GIC.xlsx: NOT FOUND - Slides 3-11/14 will be skipped")
     for c in sorted(avail["companies_found"]):
-        print(f"  {c}: found")
+        log.info("%s: found", c)
     for c in sorted(avail["companies_missing"]):
-        print(f"  {c}: NOT FOUND - will be skipped")
-    print()
+        log.warning("%s: NOT FOUND - will be skipped", c)
     return avail
 
 
@@ -70,15 +76,15 @@ def run_download(fy: str, quarter: str, companies: list[str] | None = None) -> d
 
     from competitor_analysis.ingestion import scraper
 
-    print(f"=== Phase 1: downloading source files for {fy} {quarter} ===")
-    print(f"Target directory: {cfg.download_dir()}\n")
-    asyncio.run(scraper.main(fy, quarter, companies=companies))
-    print()
+    with phase("Phase 1"):
+        log.info("Downloading source files for %s %s", fy, quarter)
+        log.info("Target directory: %s", cfg.download_dir())
+        asyncio.run(scraper.main(fy, quarter, companies=companies))
 
-    avail = print_availability(fy, quarter)
-    n_found, n_total = len(avail["companies_found"]), len(cfg.COMPANY_PDF_FILENAMES)
-    print(f"=== Phase 1 done: {n_found}/{n_total} insurer PDFs, "
-          f"GIC.xlsx {'present' if avail['gic_found'] else 'missing'} ===")
+        avail = print_availability(fy, quarter)
+        n_found, n_total = len(avail["companies_found"]), len(cfg.COMPANY_PDF_FILENAMES)
+        log.info("Phase 1 done: %d/%d insurer PDFs, GIC.xlsx %s",
+                  n_found, n_total, "present" if avail["gic_found"] else "missing")
     return avail
 
 
@@ -98,32 +104,34 @@ def run_build(fy: str, quarter: str) -> dict:
     from competitor_analysis import pipeline as run_full_pipeline
     from competitor_analysis.reporting import report as pdf_report
 
-    print(f"=== Build run: {fy} {quarter} ===\n")
+    log.info("Build run: %s %s", fy, quarter)
 
     companies_found = sorted(pdf_cache.COMPANY_PDFS.keys())
     companies_missing = sorted(set(cfg.COMPANY_PDF_FILENAMES) - set(pdf_cache.COMPANY_PDFS))
     gic_available = os.path.exists(cfg.gic_path())
-    print_availability(fy, quarter)
-
-    if not companies_found and not gic_available:
-        raise RuntimeError(
-            f"No source files found under {cfg.download_dir()} (no GIC.xlsx, no insurer PDFs). "
-            f"Re-run Phase 1, or place the files there manually."
-        )
 
     engine_path = cfg.data_engine_output_path(fy, quarter)
-    print(f"--- Phase 2: extraction into a fresh Data Engine file ({engine_path}) ---")
-    wb, ws = p.load_engine(path=cfg.DATA_ENGINE_TEMPLATE)
-    cleared = p.clear_period_values(ws)
-    print(f"Cleared {cleared} stale value cells from the template.\n")
-    run_full_pipeline.run_phase2(ws, companies=companies_found, run_gic=gic_available)
-    os.makedirs(os.path.dirname(engine_path), exist_ok=True)
-    wb.save(engine_path)
-    print(f"Saved {engine_path}.\n")
+    with phase("Phase 2"):
+        print_availability(fy, quarter)
 
-    print("--- Phase 3: report generation ---")
-    out_path = pdf_report.build(cfg.output_pdf_path(), data_engine_path=engine_path)
-    print()
+        if not companies_found and not gic_available:
+            raise RuntimeError(
+                f"No source files found under {cfg.download_dir()} (no GIC.xlsx, no insurer PDFs). "
+                f"Re-run Phase 1, or place the files there manually."
+            )
+
+        log.info("Extraction into a fresh Data Engine file (%s)", engine_path)
+        wb, ws = p.load_engine(path=cfg.DATA_ENGINE_TEMPLATE)
+        cleared = p.clear_period_values(ws)
+        log.info("Cleared %d stale value cells from the template.", cleared)
+        run_full_pipeline.run_phase2(ws, companies=companies_found, run_gic=gic_available)
+        os.makedirs(os.path.dirname(engine_path), exist_ok=True)
+        wb.save(engine_path)
+        log.info("Saved %s.", engine_path)
+
+    with phase("Phase 3"):
+        log.info("Report generation")
+        out_path = pdf_report.build(cfg.output_pdf_path(), data_engine_path=engine_path)
 
     summary = {
         "output_path": out_path,
@@ -132,7 +140,7 @@ def run_build(fy: str, quarter: str) -> dict:
         "companies_skipped": companies_missing,
         "gic_included": gic_available,
     }
-    print(f"=== Done: {out_path} ===")
+    log.info("Done: %s", out_path)
     return summary
 
 
@@ -144,6 +152,7 @@ def run(fy: str, quarter: str, download: bool, companies: list[str] | None = Non
 
 
 def main():
+    logging_setup.configure()
     args = parse_args()
     stage = args.stage
     if args.download is not None:
@@ -157,7 +166,7 @@ def main():
         else:
             run(args.fy, args.quarter, download=True, companies=companies)
     except (ValueError, RuntimeError) as e:
-        print(f"\nERROR: {e}", file=sys.stderr)
+        log.critical("%s", e)
         sys.exit(1)
 
 

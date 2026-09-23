@@ -26,6 +26,9 @@ from and how, for auditability:
 """
 from competitor_analysis.extraction import gemini as gemini_extract
 from competitor_analysis import paths
+from competitor_analysis import logging_setup
+
+log = logging_setup.get_logger(__name__)
 
 
 def llm_specs():
@@ -254,13 +257,14 @@ def audit(ws_path=None):
             missing.append(("derived", m["key"], m["slide"], m["metric1"], m["metric2"]))
 
     if not missing:
-        print("All non-templated spec targets resolve to a sheet row.")
+        log.info("All non-templated spec targets resolve to a sheet row.")
     else:
-        print(f"{len(missing)} spec target(s) with no matching sheet row:")
+        log.warning("%d spec target(s) with no matching sheet row:", len(missing))
         for source, key, slide, m1, m2 in missing:
-            print(f"  [{source}] {key}: slide{slide} / {m1!r} / {m2!r}")
+            log.warning("  [%s] %s: slide%s / %r / %r", source, key, slide, m1, m2)
     return missing
 
 
 if __name__ == "__main__":
+    logging_setup.configure()
     audit()

@@ -92,6 +92,28 @@ FILE_MAGIC = {
     "xlsx": b"PK",
 }
 
+# Per-response cap. The Search API fallback is deliberately NOT
+# domain-restricted (disclosure PDFs are often off-domain, on a CDN), so a
+# candidate URL is not guaranteed to be a small PDF - it can be an arbitrary
+# webpage. Without a cap, a wrong candidate gets fully buffered into memory
+# before validate_document ever gets a chance to reject it. Mirrors
+# MAX_UPLOAD_BYTES in api/main.py - same problem, download side instead of
+# upload side.
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # a regulatory filing runs a few MB
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
+
+# Global concurrency cap across the WHOLE Phase 1 run, not per company.
+# Companies already run fully concurrently (main()'s asyncio.gather), and
+# each one can itself race up to 8 Search candidates or several cached-URL
+# variants concurrently (try_candidates_concurrently) - unbounded, that is
+# up to ~8 companies x 8 candidates = 64 full responses potentially
+# buffered in memory at once. That combination is what actually OOM'd a
+# 512MB Render instance during retrieval - a distinct gap from Phase 2
+# extraction, which already has its own worker/memory tuning
+# (PDF_PARSE_MAX_WORKERS, MEMORY_BUDGET_MB).
+MAX_CONCURRENT_DOWNLOADS = 4
+_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 MONTH_ABBREV = {
     "january": "jan", "february": "feb", "march": "mar", "april": "apr",
     "may": "may", "june": "jun", "july": "jul", "august": "aug",
@@ -462,6 +484,41 @@ def validate_document(path: Path, ext: str, cal_data: dict, company_key: str) ->
     return True
 
 
+async def _fetch_bounded(http_client: httpx.AsyncClient, url: str, magic: bytes,
+                         file_type: str, company_key: str, attempt: int) -> bytes | None:
+    """GET `url` streamed in chunks under the global download semaphore,
+    bailing out - without buffering the rest of the response - the moment
+    it's clearly too big or (once enough bytes have arrived) clearly isn't
+    the right file type. Returns the full body on success, None on any
+    rejection (already logged)."""
+    async with _download_semaphore:
+        async with http_client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes(DOWNLOAD_CHUNK_BYTES):
+                buf.extend(chunk)
+                if len(buf) > MAX_DOWNLOAD_BYTES:
+                    log.warning(
+                        "[%s] Candidate exceeded the %dMB cap; aborting without buffering "
+                        "the rest (likely the wrong link, not a filing). Attempt %d/2.",
+                        company_key, MAX_DOWNLOAD_BYTES // (1024 * 1024), attempt)
+                    return None
+                if len(buf) >= len(magic) and not buf.startswith(magic):
+                    log.warning(
+                        "[%s] Response did not look like a %s (content-type=%s); likely a WAF "
+                        "challenge or wrong link. Attempt %d/2.",
+                        company_key, file_type, resp.headers.get("content-type"), attempt)
+                    return None
+            if not buf.startswith(magic):
+                # Response finished before ever reaching len(magic) bytes -
+                # the chunked check above never ran, so check once more here.
+                log.warning(
+                    "[%s] Response (%d bytes) did not look like a %s; likely a WAF challenge "
+                    "or wrong link. Attempt %d/2.", company_key, len(buf), file_type, attempt)
+                return None
+            return bytes(buf)
+
+
 # 4. Download the resolved file, with browser headers + a WAF-challenge check,
 # then verify its content actually covers the requested quarter.
 async def download_file(company_key: str, download_url: str, file_type: str, target_dir: Path,
@@ -478,28 +535,20 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
     async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=headers) as http_client:
         for attempt in range(1, 3):
             try:
-                resp = await http_client.get(download_url)
-                resp.raise_for_status()
+                content = await _fetch_bounded(http_client, download_url, magic, file_type,
+                                               company_key, attempt)
             except httpx.HTTPError as e:
                 log.warning("[%s] Download error on attempt %d/2: %s", company_key, attempt, e)
-                if attempt == 2:
-                    return None
-                await asyncio.sleep(2)
-                continue
+                content = None
 
-            if not resp.content.startswith(magic):
-                log.warning(
-                    "[%s] Response did not look like a %s (content-type=%s); likely a WAF "
-                    "challenge or wrong link. Attempt %d/2.",
-                    company_key, file_type, resp.headers.get("content-type"), attempt,
-                )
+            if content is None:
                 if attempt == 2:
                     return None
                 await asyncio.sleep(2)
                 continue
 
             async with aiofiles.open(dest, "wb") as f:
-                await f.write(resp.content)
+                await f.write(content)
 
             if not validate_document(dest, ext, cal_data, company_key):
                 log.warning("[%s] Discarded %s from %s (attempt %d/2).",

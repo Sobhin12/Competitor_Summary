@@ -40,9 +40,10 @@ def test_ultra_remains_available_per_company():
 
 def test_processor_timeouts_are_bounded():
     """The old single 1800s ceiling let one hung run dominate Phase 1. Every
-    per-processor budget must be far below that, and escalate with cost."""
-    assert scraper.PROCESSOR_TIMEOUTS["core"] < scraper.PROCESSOR_TIMEOUTS["pro"]
-    assert scraper.PROCESSOR_TIMEOUTS["pro"] < scraper.PROCESSOR_TIMEOUTS["ultra"]
+    per-processor budget must be far below that, and never escalate to a
+    cheaper tier costing more patience than a pricier one before it."""
+    assert scraper.PROCESSOR_TIMEOUTS["core"] <= scraper.PROCESSOR_TIMEOUTS["pro"]
+    assert scraper.PROCESSOR_TIMEOUTS["pro"] <= scraper.PROCESSOR_TIMEOUTS["ultra"]
     for name, budget in scraper.PROCESSOR_TIMEOUTS.items():
         assert budget <= 600, f"{name} budget {budget}s is too generous"
     assert scraper.SEARCH_TIMEOUT_SECONDS <= 180

@@ -37,9 +37,14 @@ PROCESSOR = "core"
 # tight: a single global 30-minute ceiling meant one hung "core" run blocked the
 # next processor for half an hour, which dominated Phase 1's runtime. A run that
 # hasn't resolved a link within its budget is far more likely stuck than slow,
-# so we cut it and escalate instead of waiting.
-PROCESSOR_TIMEOUTS = {"core": 150, "pro": 240, "ultra": 420}
-DEFAULT_PROCESSOR_TIMEOUT = 240
+# so we cut it and escalate instead of waiting. Uniformly 60s across every
+# tier (including Search, below) so the reviewer is reached fast; the
+# tradeoff is that a company which would have resolved with more patience
+# (especially via "pro") now more often lands on the reviewer as "missing"
+# instead of resolving automatically - re-tune per KNOWN_ISSUES/run logs if
+# that tradeoff turns out too aggressive in practice.
+PROCESSOR_TIMEOUTS = {"core": 60, "pro": 60, "ultra": 60}
+DEFAULT_PROCESSOR_TIMEOUT = 60
 
 # Escalation ladder, cheapest first. "ultra" is deliberately NOT here: it costs
 # materially more than core/pro and, being the third sequential attempt, it also
@@ -49,7 +54,7 @@ DEFAULT_PROCESSOR_TIMEOUT = 240
 PROCESSOR_LADDER = ["core", "pro"]
 
 # Search API budget - it's the cheap safety net, so it gets a short leash too.
-SEARCH_TIMEOUT_SECONDS = 90
+SEARCH_TIMEOUT_SECONDS = 60
 
 # Run the Search API concurrently with the FIRST processor rather than only
 # after every processor has failed. Whichever produces a downloadable file first

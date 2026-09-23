@@ -47,12 +47,22 @@ def _get_client():
         logger.info("R2 env vars not set - document storage stays local-only.")
         return None
     import boto3
+    from botocore.config import Config
     _client = boto3.client(
         "s3",
         endpoint_url=f"https://{_ACCOUNT_ID}.r2.cloudflarestorage.com",
         aws_access_key_id=_ACCESS_KEY,
         aws_secret_access_key=_SECRET_KEY,
         region_name="auto",
+        # Without an explicit bound, botocore's default socket timeouts can
+        # still leave a stuck connection (unreachable endpoint, network
+        # black-holing) hanging for minutes before it ever raises - and every
+        # caller here already treats an R2 failure as non-fatal (see module
+        # docstring), so there is no reason a slow/broken R2 should ever be
+        # able to hang the request that's waiting on it (e.g. a file upload
+        # sitting "pending" in the browser with nothing in the console).
+        config=Config(connect_timeout=10, read_timeout=60,
+                      retries={"max_attempts": 2, "mode": "standard"}),
     )
     return _client
 

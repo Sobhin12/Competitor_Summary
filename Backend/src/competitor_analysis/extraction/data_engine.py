@@ -2284,7 +2284,13 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
     }
 
     idx = build_row_index(ws)
-    log = []
+    # NOT named `log` - this function also uses the module-level logger
+    # above (log.info(...) when a company falls back to a live per-company
+    # call), and a local `log` assigned anywhere in this function makes
+    # Python treat every `log` reference in it as that local for the WHOLE
+    # function body - including the logger call above, which then raises
+    # UnboundLocalError before it ever gets there.
+    applied_log = []
     written = 0
 
     for key, rows in rows_by_key.items():
@@ -2299,19 +2305,19 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
             cur = cur / 100 if cur is not None and cur > 20 else cur
             prior = prior / 100 if prior is not None and prior > 20 else prior
         for (slide, metric1, metric2) in rows:
-            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, log)
+            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log)
 
     derived = compute_derived_metrics(company, regrouped, kind_by_key, income)
     for (slide, metric1, metric2), (cur, prior) in derived.items():
         if metric1.startswith("__SLIDE12__"):
             actual_metric1 = metric1[len("__SLIDE12__"):]
-            written += apply_metric_to_rows(ws, idx, slide, "GDPI by Channel - SAHI", actual_metric1, metric2, cur, prior, dry_run, log)
+            written += apply_metric_to_rows(ws, idx, slide, "GDPI by Channel - SAHI", actual_metric1, metric2, cur, prior, dry_run, applied_log)
         else:
-            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, log)
+            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log)
 
     write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived)
 
-    return written, log, raw
+    return written, applied_log, raw
 
 
 # Populated by prefetch_gemini_metrics so the write stage can consume results

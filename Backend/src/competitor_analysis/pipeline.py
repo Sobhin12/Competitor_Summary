@@ -193,6 +193,23 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
         for msg in dict.fromkeys(p.RESOLUTION_LOG):
             print(f"   * {msg}")
 
+    # ---- Stage 6: backfill prior-period gaps from last year's own filing ----
+    # Slides 16/17 (zone/state mix) and 23/25 (claims settlement schedules,
+    # offices/employee counts) can have a real PRIOR-period gap even in a
+    # clean run - some source schedules never carry a prior-year comparative
+    # at all. Last year's own run captured that same quarter's number back
+    # when it was "current" - reuse it here instead of leaving those charts
+    # current-period-only forever. No-ops (and says so) until a same-quarter
+    # run from last year actually exists on disk.
+    t0 = time.time()
+    backfill_written, backfill_log = p.backfill_prior_from_last_year(ws)
+    t_backfill = time.time() - t0
+    if backfill_written:
+        print(f"[Prior Backfill]  {backfill_written} prior-period cell(s) filled from last year's own "
+              f"filing ({cfg.prior_fy()} {cfg.QUARTER})  -  {t_backfill:.1f}s")
+    else:
+        print(f"[Prior Backfill]  no {cfg.prior_fy()} {cfg.QUARTER} Data Engine archive found on disk - skipped.")
+
     t_total = time.time() - t_start
     print(f"\nPhase 2 pipeline time: {t_total:.1f}s")
 

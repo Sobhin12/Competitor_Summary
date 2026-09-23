@@ -737,10 +737,19 @@ def metric_panels_page(pdf, rows, slide_no, title, page_no, panels_def, footnote
     for (pdef, keys, prior, current), spec in zip(resolved, panels):
         charts.panel_box(fig, spec, title=pdef["title"])
         is_pct = pdef["kind"] == "percent"
-        if pdef.get("mode", "grouped") == "single":
-            charts.single_bar(fig, spec, disp_names(keys), current, is_percent=is_pct)
-        else:
+        # Grouped (cur+prior) whenever any prior value actually exists for
+        # this metric - some schedules (NL-37 claims count, NL-41
+        # offices/employees) never carry a prior-year comparative, so a
+        # single current-only bar is all there is until data_engine's
+        # backfill_prior_from_last_year() fills a gap from last year's own
+        # filing. Auto-detected from the data rather than a static per-panel
+        # flag, so a metric that gains prior-year coverage (via that
+        # backfill, or the source schedule itself) switches to grouped
+        # automatically with no report.py change needed.
+        if any(v is not None for v in prior):
             charts.grouped_bar(fig, spec, disp_names(keys), prior, current, is_percent=is_pct)
+        else:
+            charts.single_bar(fig, spec, disp_names(keys), current, is_percent=is_pct)
     draw_insights(fig, ins, ins_bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -941,13 +950,13 @@ def slide_22(pdf, rows):
 def slide_23(pdf, rows):
     panels = [
         {"title": "Claims Settlement Ratio", "metric1": "Claims Settlement Ratio", "metric2": None,
-         "kind": "percent", "mode": "single"},
+         "kind": "percent"},
         # Data Engine cell stays plain Rs. (claims Rs. / claims_settled count) -
         # "scale" converts only this chart's display to Rs. Lakhs.
         {"title": "Average Claim Size (Rs. Lakhs)", "metric1": "Average Claim Size", "metric2": None,
-         "kind": "money", "mode": "single", "scale": 1e-5},
+         "kind": "money", "scale": 1e-5},
         {"title": "No. of Claims to No. of Policies", "metric1": "No. of claims to No. of policies", "metric2": None,
-         "kind": "percent", "mode": "single", "higher_is_better": False},
+         "kind": "percent", "higher_is_better": False},
     ]
     metric_panels_page(pdf, rows, 23, "Key Metrics", 23, panels,
                         footnote="Average Claim Size and No. of claims to policies are best-effort estimates.")
@@ -969,9 +978,9 @@ def slide_25(pdf, rows):
         {"title": "Manpower cost to total Opex", "metric1": "Manpower cost to total Opex", "metric2": None,
          "kind": "percent"},
         {"title": "Manpower cost per employee (Rs.)", "metric1": "Manpower cost per employee", "metric2": None,
-         "kind": "money", "mode": "single"},
+         "kind": "money"},
         {"title": "Facility rental per office per month (Rs. Lakhs)", "metric1": "Facility rental per office per month",
-         "metric2": None, "kind": "money", "mode": "single"},
+         "metric2": None, "kind": "money"},
     ]
     metric_panels_page(pdf, rows, 25, "Key Metrics", 25, panels)
 

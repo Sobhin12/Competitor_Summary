@@ -20,6 +20,7 @@ convention exists, not as something re-verifiable in-tree.
 import asyncio
 import argparse
 import gc
+import glob
 import json
 import math
 import os
@@ -1731,6 +1732,86 @@ def apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, 
                 ws.cell(row=row, column=COL["Growth"]).value = g
         written += 1
     return written
+
+
+# (slide, metric1, metric2) targets whose PRIOR-period gap isn't a bug in
+# THIS run's extraction - the source schedule genuinely has no prior-year
+# comparative (NL-37 claims count, NL-41 offices/employees, both point-in-
+# time-only), or the gap is simply how Slides 16/17's zone/state mix landed
+# this quarter. The only place a real number for that same quarter-last-year
+# still exists is last year's OWN filing, captured back when it was the
+# "current" period - see backfill_prior_from_last_year().
+PRIOR_BACKFILL_TARGETS = (
+    [(16, z, None) for z in ("North", "South", "East", "West", "Central")]
+    + [(17, s, None) for s in ("Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana",
+                                "Tamil Nadu", "Kerala", "Delhi", "Others")]
+    + [(23, m, None) for m in ("Average Claim Size", "No. of claims to No. of policies",
+                                "Claims Settlement Ratio")]
+    + [(25, m, None) for m in ("Manpower cost per employee", "Facility rental per office per month")]
+)
+
+
+def _latest_prior_period_archive():
+    """Path to the most recently saved Data_Engine_{prior_fy}_{QUARTER}_*.xlsx
+    under artifacts/output/, or None if last year's same quarter was never
+    run (or its output no longer exists on disk). That file's own CURRENT-
+    period column holds exactly the figures this run wants as its prior-
+    period fallback - same quarter, one financial year earlier."""
+    pattern = str(paths.OUTPUT_DIR / f"Data_Engine_{cfg.prior_fy()}_{cfg.QUARTER}_*.xlsx")
+    matches = sorted(glob.glob(pattern))
+    return matches[-1] if matches else None
+
+
+def backfill_prior_from_last_year(ws, dry_run=False):
+    """Fills PRIOR-period gaps listed in PRIOR_BACKFILL_TARGETS from last
+    year's own Data Engine output for the same quarter, whose CUR column is
+    exactly the number this run wants as PRIOR. Never overwrites a prior
+    value this run's own extraction already found - a real number in THIS
+    filing always wins over a backfilled one, and a cell is only ever
+    touched if it's still empty. Returns (written_count, log)."""
+    archive_path = _latest_prior_period_archive()
+    if archive_path is None:
+        return 0, []
+    # NOT read_only=True: read-only worksheets only stream efficiently via
+    # iter_rows() - row_dict()'s per-header ws.cell(row=, column=) random
+    # access degrades to an XML re-scan per call in that mode (observed:
+    # 300s+ for one archive file vs. under a second fully loaded), the same
+    # reason load_engine() never uses it either.
+    archive_wb = openpyxl.load_workbook(archive_path, data_only=True)
+    try:
+        archive_ws = archive_wb["Data Engine"]
+        idx = build_row_index(ws)
+        archive_idx = build_row_index(archive_ws)
+        written = 0
+        log = []
+        for slide, metric1, metric2 in PRIOR_BACKFILL_TARGETS:
+            for company in COMPANY_PDFS:
+                key = (slide, normalize_text(company), normalize_text(metric1))
+                candidates = idx.get(key, [])
+                arch_candidates = archive_idx.get(key, [])
+                if metric2 is not None:
+                    target_m2 = normalize_text(metric2)
+                    candidates = [c for c in candidates if c[1] == target_m2]
+                    arch_candidates = [c for c in arch_candidates if c[1] == target_m2]
+                if not candidates or not arch_candidates:
+                    continue
+                arch_cur = row_dict(archive_ws, arch_candidates[0][0])[CUR]
+                if arch_cur is None:
+                    continue
+                for row, _ in candidates:
+                    d = row_dict(ws, row)
+                    if d[PRIOR] is not None:
+                        continue
+                    if not dry_run:
+                        ws.cell(row=row, column=COL[PRIOR]).value = arch_cur
+                        g = growth(d[CUR], arch_cur)
+                        if g is not None:
+                            ws.cell(row=row, column=COL["Growth"]).value = g
+                    written += 1
+                    log.append((slide, company, metric1, metric2))
+        return written, log
+    finally:
+        archive_wb.close()
 
 
 def _converted_value(regrouped, kind_by_key, key):

@@ -212,10 +212,10 @@ def master_metric_specs():
     # --- NL-29 Debt Securities: rating & maturity mix (use Book Value % of total) ---
     for metric1, label in DEBT_RATINGS:
         add(f"debt_rating_{metric1}", f"'{label}' row's Book Value 'as % of total for this class' (the credit-rating breakdown percentage), from the Detail Regarding Debt Securities Schedule (NL-29). If 'Rated below A' isn't a single row, sum 'Rated below A but above B' + 'Rated Below B'.",
-            ["NL-29"], "percent", [(28, metric1, None)])
+            ["NL-29"], "percent", [(29, metric1, None)])
     for bucket in MATURITY_BUCKETS:
         add(f"debt_maturity_{bucket}", f"'{bucket}' row's Book Value 'as % of total for this class' (the residual-maturity breakdown percentage), from the Detail Regarding Debt Securities Schedule (NL-29).",
-            ["NL-29"], "percent", [(29, bucket, None)])
+            ["NL-29"], "percent", [(30, bucket, None)])
 
     # --- NL-33 Reinsurance: total premium ceded ---
     add("ri_ceded_total", "Total premium ceded to reinsurers (Upto the Quarter), from the 'Grand Total (C)' row of the Reinsurance/Retrocession Risk Concentration Schedule (NL-33). That row's total is usually split across 'Proportional' + 'Non-Proportional' + 'Facultative' sub-columns - if so, SUM those sub-column values together to get the one total figure requested here.",

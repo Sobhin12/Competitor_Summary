@@ -91,18 +91,18 @@ DERIVED_METRIC_SPECS = [
               "time this was calibrated; not a documented spec)."},
 
     # --- Slide 30: Historical Trends duplicates of Slide 18 ---
-    # --- Slide 30: claims & grievances (current period; prior backfilled from last year's Data Engine) ---
-    {"key": "csr_amount_30", "slide": 30, "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
+    # --- Slide 27: claims & grievances (current period; prior backfilled from last year's Data Engine) ---
+    {"key": "csr_amount_27", "slide": 27, "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "extract_nl37_amount_csr: settled / (O/S at beginning + reported - O/S at end), NL-37 amount block, Total column",
      "inputs": ["NL-37 amount block (Rs. lakh, year to date, deterministic)"],
      "notes": "Same formula as Slide 23's count-based ratio. ManipalCigna's NL-37 notes that its reported/outstanding "
               "amounts are claimed amounts, not payouts."},
-    {"key": "claim_complaints_30", "slide": 30, "metric1": "Claim Complaints per 10,000 claims", "metric2": None,
+    {"key": "claim_complaints_27", "slide": 27, "metric1": "Claim Complaints per 10,000 claims", "metric2": None,
      "kind": "number", "source": "derived", "companies": "all",
      "formula": "extract_nl45_complaint_ratios: NL-45 item 7, as printed",
      "inputs": ["NL-45 Grievance Disposal (deterministic)"]},
-    {"key": "policy_complaints_30", "slide": 30, "metric1": "Policy Complaints per 10,000 policies", "metric2": None,
+    {"key": "policy_complaints_27", "slide": 27, "metric1": "Policy Complaints per 10,000 policies", "metric2": None,
      "kind": "number", "source": "derived", "companies": "all",
      "formula": "extract_nl45_complaint_ratios: NL-45 item 6, as printed",
      "inputs": ["NL-45 Grievance Disposal (deterministic)"]},

@@ -1334,7 +1334,7 @@ CATEGORY_CODE_TO_BUCKET = {
     "EGMF": "Mutual Funds", "EMPG": "Mutual Funds", "OMGS": "Mutual Funds",
 }
 
-# Matches slide_27's series_names in reporting/report.py exactly.
+# Matches slide_28's series_names in reporting/report.py exactly.
 INVESTMENT_PORTFOLIO_BUCKETS = (
     "Govt Bonds", "Corporate Bonds/Debentures", "Deposits", "Equity/Invits/REIT", "Mutual Funds",
 )
@@ -1387,7 +1387,7 @@ def extract_investment_portfolio(pdf_path):
             # Only worth a warning when the row actually carries money.
             if cur_v or prior_v:
                 RESOLUTION_LOG.append(f"NL-31 category code {code!r} not in CATEGORY_CODE_TO_BUCKET - "
-                                      f"excluded from Slide 27 ({cur_v} / {prior_v} lakh)")
+                                      f"excluded from Slide 28 ({cur_v} / {prior_v} lakh)")
             continue
         if cur_v is not None:
             cur_by_bucket[bucket] = cur_by_bucket.get(bucket, 0) + cur_v
@@ -1402,7 +1402,7 @@ def extract_investment_portfolio(pdf_path):
             summed = sum(by_bucket.values())
             if printed and abs(summed - printed) > 0.005 * printed:
                 RESOLUTION_LOG.append(f"NL-31 {label} buckets sum to {summed:,.0f} lakh but the form's TOTAL "
-                                      f"is {printed:,.0f} - Slide 27 may be incomplete ({pdf_path})")
+                                      f"is {printed:,.0f} - Slide 28 may be incomplete ({pdf_path})")
     return {b: (lakhs_to_cr(cur_by_bucket.get(b)), lakhs_to_cr(prior_by_bucket.get(b)))
             for b in INVESTMENT_PORTFOLIO_BUCKETS if b in cur_by_bucket or b in prior_by_bucket}
 
@@ -2178,10 +2178,10 @@ PRIOR_BACKFILL_TARGETS = (
                                 # comes from the same place as the ratio's.
                                 "Total no. of claims (NL-45)", "Total no. of policies (NL-36)")]
     + [(24, "IT spend to GWP ratio", None)]
-    + [(30, m, None) for m in ("Claim Settlement Ratio (Amount)", "Claim Complaints per 10,000 claims",
+    + [(27, m, None) for m in ("Claim Settlement Ratio (Amount)", "Claim Complaints per 10,000 claims",
                                 "Policy Complaints per 10,000 policies")]
     # Only fills a gap - e.g. ABHI's NL-31 has no same-period prior block.
-    + [(27, b, None) for b in ("Govt Bonds", "Corporate Bonds/Debentures", "Deposits",
+    + [(28, b, None) for b in ("Govt Bonds", "Corporate Bonds/Debentures", "Deposits",
                                 "Equity/Invits/REIT", "Mutual Funds")]
     + [(25, m, None) for m in ("Manpower cost per employee", "Facility rental per office per month")]
 )
@@ -2481,10 +2481,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # (see extract_investment_yield) - not computed here.
     D[(36, "Investment Yield", None)] = income.get("investment_yield", (None, None))
 
-    # Slide 27: Investment Portfolio, read directly off NL-31's per-category
+    # Slide 28: Investment Portfolio, read directly off NL-31's per-category
     # rows summed by bucket (see extract_investment_portfolio) - not computed here.
     for bucket, (cur_v, prior_v) in income.get("investment_portfolio", {}).items():
-        D[(27, bucket, None)] = (cur_v, prior_v)
+        D[(28, bucket, None)] = (cur_v, prior_v)
 
     # Slide 33: reinsurance ratios (current period only - NL-33 has no prior-year column)
     ri_ceded_cur, _ = get("ri_ceded_total")
@@ -2643,13 +2643,13 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # item 5) / NL-36's total policies (up to the quarter, every channel).
     # Current period only - the prior value is backfilled from last year's
     # own Data Engine (PRIOR_BACKFILL_TARGETS).
-    # Slide 30: claims & grievances, current period only (read directly off
+    # Slide 27: claims & grievances, current period only (read directly off
     # NL-37's amount block and NL-45 items 6/7); the prior is backfilled
     # from last year's Data Engine.
-    D[(30, "Claim Settlement Ratio (Amount)", None)] = income.get("csr_amount", (None, None))
+    D[(27, "Claim Settlement Ratio (Amount)", None)] = income.get("csr_amount", (None, None))
     policy_complaints, claim_complaints = income.get("complaint_ratios", (None, None))
-    D[(30, "Claim Complaints per 10,000 claims", None)] = (claim_complaints, None)
-    D[(30, "Policy Complaints per 10,000 policies", None)] = (policy_complaints, None)
+    D[(27, "Claim Complaints per 10,000 claims", None)] = (claim_complaints, None)
+    D[(27, "Policy Complaints per 10,000 policies", None)] = (policy_complaints, None)
 
     nl45_claims_cur, _ = income.get("nl45_claims", (None, None))
     D[(23, SLIDE23_CLAIMS_METRIC1, None)] = (nl45_claims_cur, None)

@@ -115,7 +115,7 @@ def new_page(title, page_no, n_panels, height_ratios=None, want_insights=False, 
     pass a larger `bottom` to keep the panel's box/legend clear of the
     page-number pennant in the footer."""
     fig = plt.figure(figsize=theme.PAGE_SIZE, dpi=theme.DPI)
-    _header_footer(fig, title, page_no)
+    _header_footer(fig, title, page_no + SLIDE_TO_PAGE_OFFSET)
     total_rows = n_panels + (1 if want_insights else 0)
     ratios = list(height_ratios) if height_ratios else [1] * n_panels
     if want_insights:
@@ -196,11 +196,18 @@ def cover_page(pdf):
 
 
 TOC_ENTRIES = [
-    ("Overall Industry & Market share", "3-7"), ("Revenue (Segment, Channel, Geographical mix)", "8-17"),
-    ("Income statement", "18"), ("Segment performance (Health, PA, Travel)", "19-21"),
-    ("Key metrics", "22-26"), ("Investment portfolio", "27-29"),
-    ("Historical trends", "30-34"), ("AUM", "35-36"), ("Distribution footprints", "37-38"),
+    ("Key Highlights", "3"),
+    ("Overall Industry & Market share", "4-8"), ("Revenue (Segment, Channel, Geographical mix)", "9-18"),
+    ("Income statement", "19"), ("Segment performance (Health, PA, Travel)", "20-22"),
+    ("Key metrics", "23-27"), ("Investment portfolio", "28-30"),
+    ("Claims & grievances", "31"), ("Historical trends", "32-36"), ("AUM", "37-38"),
+    ("Distribution footprints", "39-40"),
 ]
+
+# The Key Highlights page (page 3) has no Data Engine slide of its own, so
+# every content page prints one past its Data Engine slide number. slide_NN
+# functions keep passing their Data Engine slide number; new_page adds this.
+SLIDE_TO_PAGE_OFFSET = 1
 
 
 def toc_page(pdf, page_no):
@@ -245,6 +252,104 @@ def glossary_page(pdf, page_no):
     for line in lines:
         fig.text(0.08, y, f"➔  {line}", fontsize=10, wrap=True, va="top")
         y -= 0.09
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Key Highlights (page 3)
+# ---------------------------------------------------------------------------
+
+# Hardcoded for now (Q1'FY27 reference deck) - not derived from the Data
+# Engine, so it does NOT follow the reporting period. Each entry: (fill,
+# border, bullets, footnote-or-None), drawn top to bottom.
+KEY_HIGHLIGHTS = [
+    ("#E2EFDA", "#8EA9C1", [
+        "General Insurance Q1’FY27 growth at 10.9% against 8.8% in Q1’FY26 (with 1/n impact) and "
+        "Q1’FY27 growth for without 1/n impact at 10.8%",
+        "Health & PA growth Q1’FY27: 22.4% (SAHI: 32.9%, Pvt. GI: 31.6%, PSU GI: 7.7%)",
+    ], None),
+    ("#DDE3F3", "#8EA9C1", [
+        "Health & PA is the largest segment in GI Industry with Q1’FY27 market share at 49.5% "
+        "(Q1’FY26 at 44.8%)",
+        "NBHI Retail Health market share for Q1’FY27 at 11.1% (Q1’FY26 at 10.0%)",
+    ], None),
+    ("#FFF2CC", "#8EA9C1", [
+        "NBHI & STAR maintained healthy solvency of 2.25 & 2.09 in Q1’FY27 (highest among SAHI)",
+        "ABHI & CARE solvency lowest among SAHI for Q1’FY27 at 1.58",
+    ], None),
+    ("#FBE5D6", "#8EA9C1", [
+        "All SAHI’s profitability improved in Q1’FY27",
+        "NBHI recorded highest PAT growth amongst SAHI at 93%",
+        "STAR reported the lowest CISR amongst SAHI at 97.1% for Q1’FY27 (-1.6% vs Q1’FY26)",
+        "NBHI & STAR were only SAHI’s with improved loss ratio over Q1’FY26",
+    ], "Above comments are based on Ind AS Financials for SAHI excluding CIGNA"),
+    ("#DDEBF7", "#8EA9C1", [
+        "CARE reported outside India business of Rs 6 crs in Q1’FY27 in line with Q1’FY26",
+        "ABHI has the highest Claim Settlement Ratio (Number of claims) among SAHI’s at 97.5%",
+    ], None),
+]
+
+
+def key_highlights_page(pdf, page_no):
+    """Rounded, colour-filled boxes of bullet text (KEY_HIGHLIGHTS), stacked
+    down the page and sized to their own wrapped line count, with the
+    report's usual header/footer."""
+    fig = plt.figure(figsize=theme.PAGE_SIZE, dpi=theme.DPI)
+    _header_footer(fig, "Key Highlights", page_no)
+
+    x0, width = 0.09, 0.85
+    fontsize, line_h = 11, 0.022
+    pad_y, gap, foot_h = 0.02, 0.03, 0.022
+    text_x = x0 + 0.025
+    max_w = (x0 + width - 0.02 - text_x) * fig.get_figwidth() * fig.dpi  # usable width, pixels
+    renderer = fig.canvas.get_renderer()
+
+    def fits(s):
+        t = fig.text(0, 0, s, fontsize=fontsize)
+        w = t.get_window_extent(renderer=renderer).width
+        t.remove()
+        return w <= max_w
+
+    def wrap(bullet):
+        # Longest-fitting greedy wrap by rendered width, so a line never
+        # runs past the box edge whatever the font's character widths.
+        out, cur = [], ""
+        for word in bullet.split():
+            trial = f"{cur} {word}".strip()
+            prefix = "▪   " if not out else "     "
+            if cur and not fits(prefix + trial):
+                out.append(cur)
+                cur = word
+            else:
+                cur = trial
+        out.append(cur)
+        return ["▪   " + out[0]] + ["     " + w for w in out[1:]]
+
+    boxes = []
+    for fill, border, bullets, foot in KEY_HIGHLIGHTS:
+        lines = [line for b in bullets for line in wrap(b)]
+        boxes.append((fill, border, lines, foot))
+
+    used = sum(len(l) * line_h + 2 * pad_y + (foot_h if f else 0) for _, _, l, f in boxes)
+    top, bottom = 0.87, 0.08
+    gap = max(gap, (top - bottom - used) / max(len(boxes) - 1, 1)) if len(boxes) > 1 else 0
+    gap = min(gap, 0.06)
+    y = top
+    for fill, border, lines, foot in boxes:
+        h = len(lines) * line_h + 2 * pad_y
+        fig.add_artist(FancyBboxPatch((x0, y - h), width, h, transform=fig.transFigure,
+                                      boxstyle="round,pad=0,rounding_size=0.015", linewidth=1.2,
+                                      edgecolor=border, facecolor=fill, clip_on=False))
+        for i, line in enumerate(lines):
+            fig.text(text_x, y - pad_y - (i + 0.5) * line_h, line, fontsize=fontsize,
+                     color=theme.DARK_TEXT, va="center", ha="left", transform=fig.transFigure)
+        y -= h
+        if foot:
+            fig.text(x0 + 0.005, y - foot_h / 2, foot, fontsize=7.5, color=theme.DARK_TEXT, va="center",
+                     ha="left", transform=fig.transFigure)
+            y -= foot_h
+        y -= gap
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -1138,71 +1243,89 @@ def slide_29(pdf, rows):
 
 
 # ---------------------------------------------------------------------------
-# Slides 30-36: Historical Trends (Key Ratios) / Asset Under Management -
+# Slide 30: Claims & Grievances - NL-37's amount block and NL-45 items 6/7,
+# current period read from the filing, prior backfilled from last year's
+# Data Engine (see data_engine.PRIOR_BACKFILL_TARGETS).
+# ---------------------------------------------------------------------------
+
+def slide_30(pdf, rows):
+    panels = [
+        {"title": "Claim Settlement Ratio (Amount)", "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
+         "kind": "percent"},
+        {"title": "Claim Complaints per 10,000 claims", "metric1": "Claim Complaints per 10,000 claims",
+         "metric2": None, "kind": "number", "higher_is_better": False},
+        {"title": "Policy Complaints per 10,000 policies", "metric1": "Policy Complaints per 10,000 policies",
+         "metric2": None, "kind": "number", "higher_is_better": False},
+    ]
+    metric_panels_page(pdf, rows, 30, "Key Metrics: Claims & Grievances", 30, panels)
+
+
+# ---------------------------------------------------------------------------
+# Slides 31-37: Historical Trends (Key Ratios) / Asset Under Management -
 # multi-year, from data/historical/Historical_Trends.xlsx. Replaces this
 # range's earlier 2-period cur/prior bars (which carried a footnote
 # apologizing for not having real multi-year history - now they do).
 # ---------------------------------------------------------------------------
 
-def slide_30(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 30, [
+def slide_31(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 31, [
         {"title": "GWP"},
         {"title": "PBT"},
     ])
 
 
-def slide_31(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 31, [
+def slide_32(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 32, [
         {"title": "Combined Ratio", "is_percent": True, "unit_label": None},
         {"title": "Loss Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_32(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 32, [
+def slide_33(pdf, rows):
+    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 33, [
         {"title": "Expense Ratio", "is_percent": True, "unit_label": None},
         {"title": "Expense of Management Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_33(pdf, rows):
-    historical_trend_page(pdf, "RI Ceded", 33, [
+def slide_34(pdf, rows):
+    historical_trend_page(pdf, "RI Ceded", 34, [
         {"title": "RI Ceding Ratio", "is_percent": True, "unit_label": None},
         {"title": "RI Commission to Ceding Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
-def slide_34(pdf, rows):
-    historical_trend_page(pdf, "ROE & Solvency", 34, [
+def slide_35(pdf, rows):
+    historical_trend_page(pdf, "ROE & Solvency", 35, [
         {"title": "ROE", "is_percent": True, "unit_label": None},
         {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{fmt_fixed(v, 2)}x"},
     ])
 
 
-def slide_35(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 35, [
+def slide_36(pdf, rows):
+    historical_trend_page(pdf, "Asset Under Management", 36, [
         {"title": "AUM"},
         {"title": "Investment Yield", "is_percent": True, "unit_label": None,
          "value_fmt": lambda v: f"{fmt_fixed(v * 100, 1)}%"},
     ])
 
 
-def slide_36(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 36, [
+def slide_37(pdf, rows):
+    historical_trend_page(pdf, "Asset Under Management", 37, [
         {"title": "AUM Shareholders"},
         {"title": "AUM Policyholders"},
     ])
 
 
 # ---------------------------------------------------------------------------
-# Slides 37-38: Distribution Footprint
+# Slides 38-39: Distribution Footprint
 # ---------------------------------------------------------------------------
 
-def slide_37(pdf, rows):
+def slide_38(pdf, rows):
     """Multi-year trend, sourced from reporting.historical - replaces this
     slide's earlier current-period-only bars. `rows` unused, kept only so
     SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
-    historical_trend_page(pdf, "Distribution Footprint", 37, [
+    historical_trend_page(pdf, "Distribution Footprint", 38, [
         {"title": "Employees", "panel_title": "Employees (On-roll)", "unit_label": "Count"},
         {"title": "Agents", "panel_title": "Individual Agents", "unit_label": "Count"},
     ])
@@ -1211,7 +1334,7 @@ def slide_37(pdf, rows):
 INTERMEDIARY_TYPES = ["Individual Agents", "CA-Banks", "CA-Others", "Brokers", "WA", "IMF", "POS"]
 
 
-def slide_38(pdf, rows):
+def slide_39(pdf, rows):
     """No. of Offices is now a multi-year trend from reporting.historical;
     Intermediaries by type has no multi-year workbook table, so it stays on
     the Data Engine's current-period `rows`, same as before - this slide mixes
@@ -1226,7 +1349,7 @@ def slide_38(pdf, rows):
         off_years = historical.sorted_years(off_table)
         off_values = {k: [off_table[k].get(y) for y in off_years] for k in off_keys}
 
-    cdata = data.by_company(rows, 38, theme.canonical_company)
+    cdata = data.by_company(rows, 39, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
     disp = disp_names(keys)
     # Agent type on the x-axis, one stacked segment per company (not the
@@ -1247,7 +1370,7 @@ def slide_38(pdf, rows):
     # bullet this slide used to compute from a single period) - bottom=0.13
     # keeps the last panel's legend clear of the footer, same as
     # historical_trend_page's pages.
-    fig, panels, _ins = new_page("Distribution Footprint", 38, n_panels, hspace=0.5, bottom=0.13)
+    fig, panels, _ins = new_page("Distribution Footprint", 39, n_panels, hspace=0.5, bottom=0.13)
     idx = 0
     if has_off:
         charts.trend_lines(fig, panels[idx], off_years, off_keys, off_values, title="No. of Offices",
@@ -1317,7 +1440,8 @@ def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
 SECTION_FUNCS = [slide_03, slide_04, slide_05, slide_06, slide_07, slide_08, slide_09, slide_10, slide_11,
                  slide_12, slide_13, slide_14, slide_15, slide_16, slide_17, slide_18, slide_19, slide_20,
                  slide_21, slide_22, slide_23, slide_24, slide_25, slide_26, slide_27, slide_28, slide_29,
-                 slide_30, slide_31, slide_32, slide_33, slide_34, slide_35, slide_36, slide_37, slide_38]
+                 slide_30, slide_31, slide_32, slide_33, slide_34, slide_35, slide_36, slide_37, slide_38,
+                 slide_39]
 
 
 def build(out_path=None, data_engine_path=None):
@@ -1341,9 +1465,10 @@ def build(out_path=None, data_engine_path=None):
     with PdfPages(out_path) as pdf:
         cover_page(pdf)
         toc_page(pdf, 2)
+        key_highlights_page(pdf, 3)
         for fn in SECTION_FUNCS:
             fn(pdf, rows)
-        glossary_page(pdf, 39)
+        glossary_page(pdf, 41)
     log.info("Saved %s", out_path)
     return out_path
 

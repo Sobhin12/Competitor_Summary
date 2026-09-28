@@ -32,10 +32,10 @@ import openpyxl
 from competitor_analysis import logging_setup
 from competitor_analysis.extraction.forms import (COMPANY_PDFS, get_form_page, get_line_item, get_line_item_any,
                           get_form_text, get_line_item_from_text, sum_rows_after,
-                          get_segment_line_item, get_segment_line_item_any,
+                          get_segment_line_item, get_segment_line_item_any, sum_lines_after_from_text,
                           extract_nl36 as pdf_extract_nl36, NL36_CHANNELS,
                           RESOLUTION_LOG, year_frags as pdf_extract_year_frags,
-                          _is_cumulative_header, _SNAPSHOT_PHRASE_RE)
+                          _is_cumulative_header, _SNAPSHOT_PHRASE_RE, parse_num)
 from competitor_analysis.extraction import gemini as gemini_extract
 from competitor_analysis.extraction import schemas
 from competitor_analysis import config as cfg
@@ -1014,6 +1014,21 @@ def extract_income_statement(company_short, pdf_path):
         gst = (None, None)
     out["GST"] = tuple(lakhs_to_cr(v) for v in gst)
 
+    # NL-7 "Others: In House Claim Processing Cost" - printed as a negative
+    # (cost moved out of opex into claims) by the filers that have it (Star
+    # Health; Galaxy prints the line blank). Half of it comes off manpower
+    # cost (see compute_derived_metrics). All NL-7 pages, since Star prints
+    # its prior-year block on a second page.
+    nl7_all, _ = get_form_page(pdf_path, r"FORM\s+NL-7", all_matches=True)
+    if nl7_all:
+        in_house = get_line_item(nl7_all, "In House Claim Processing")
+    elif nl7_text:
+        in_house = get_line_item_from_text(nl7_text, "In House Claim Processing", form="NL-7")
+    else:
+        in_house = (None, None)
+    out["In House Claim Processing Cost"] = tuple(lakhs_to_cr(abs(v)) if v is not None else None
+                                                  for v in in_house)
+
     # NL-2's "TOTAL (B)" line is PROVISIONS (Other than Taxation, section 4)
     # plus OTHER EXPENSES (section 5) combined - verified against NBHI's own
     # sub-items (65 + 946 = 1,011 = its printed TOTAL (B)). Section 5 includes
@@ -1036,6 +1051,11 @@ def extract_income_statement(company_short, pdf_path):
     # sub-item breakdown, which the broad "contribution to policyholders"
     # search matches directly.
     STOP_AFTER_CONTRIBUTION_GROUP = re.compile(r"^\(g\)|total", re.IGNORECASE)
+    # NL-2 section 3 "OTHER INCOME" (FX gain, interest income, provisions/
+    # liabilities written back, misc) - netted off Total Overheads below.
+    # Its sub-items differ by insurer, so every line under the heading is
+    # summed, up to "TOTAL (A)", which closes the income section.
+    STOP_AFTER_OTHER_INCOME = re.compile(r"total", re.IGNORECASE)
 
     if nl2:
         sh_interest = get_line_item(nl2, "Interest,", "Rent")
@@ -1046,6 +1066,7 @@ def extract_income_statement(company_short, pdf_path):
         pat = get_line_item(nl2, "after tax")
         nl2_total_b = get_line_item(nl2, "TOTAL", "(B)")
         nl2_contribution = sum_rows_after(nl2, ("Contribution to Policyholders",), STOP_AFTER_CONTRIBUTION_GROUP)
+        nl2_other_income = sum_rows_after(nl2, ("OTHER INCOME",), STOP_AFTER_OTHER_INCOME, include_anchor=True)
         # "(f)(ii) Towards remuneration of MD/CEO/WTD/Other KMPs" - needed for
         # the EOM Ratio formula, which subtracts it out of Opex.
         ceo_remuneration = get_line_item(nl2, "remuneration of MD")
@@ -1082,11 +1103,13 @@ def extract_income_statement(company_short, pdf_path):
                 if nl2_contribution != (None, None):
                     break
         ceo_remuneration = get_line_item_from_text(nl2_text, "remuneration of MD", form="NL-2")
+        nl2_other_income = sum_lines_after_from_text(nl2_text, ("OTHER INCOME",), STOP_AFTER_OTHER_INCOME,
+                                                     form="NL-2")
         out["PBT"] = tuple(lakhs_to_cr(v) for v in pbt)
         out["PAT"] = tuple(lakhs_to_cr(v) for v in pat)
     else:
         sh_interest = sh_profit_sale = sh_loss_sale = sh_amort = (None, None)
-        nl2_total_b = nl2_contribution = (None, None)
+        nl2_total_b = nl2_contribution = nl2_other_income = (None, None)
         ceo_remuneration = (None, None)
     out["CEO Remuneration"] = tuple(lakhs_to_cr(v) for v in ceo_remuneration)
 
@@ -1108,16 +1131,19 @@ def extract_income_statement(company_short, pdf_path):
     # equal NL-6's Net Commission / NL-7's Operating Expenses TOTAL - NL-1
     # cites them by schedule number and restates their grand totals verbatim)
     # plus NL-2's Provisions + Other Expenses, net of the Contribution to
-    # Policyholders' A/c inter-account transfer described above. Commission/
-    # opex missing is still fatal (there is no overheads figure at all
-    # without them); the NL-2 addend degrades to 0 if it can't be found,
-    # rather than blanking an otherwise-good NL-1-derived total.
+    # Policyholders' A/c inter-account transfer described above, and net of
+    # NL-2's Other Income (matches the reference deck's figure - verified on
+    # FY26-27 Q1 for NBHI/STAR/CARE). Commission/opex missing is still fatal
+    # (there is no overheads figure at all without them); each NL-2 term
+    # degrades to 0 if it can't be found, rather than blanking an
+    # otherwise-good NL-1-derived total.
     nl2_addend = tuple(
         (tb - (contrib or 0)) if tb is not None else None
         for tb, contrib in zip(nl2_total_b, nl2_contribution)
     )
     overheads = tuple(
-        (a or 0) + (b or 0) + (nl2_addend[i] or 0) if a is not None and b is not None else None
+        (a or 0) + (b or 0) + (nl2_addend[i] or 0) - (nl2_other_income[i] or 0)
+        if a is not None and b is not None else None
         for i, (a, b) in enumerate(zip(commission, opex))
     )
     out["Total Overheads"] = tuple(lakhs_to_cr(v) for v in overheads)
@@ -1125,21 +1151,44 @@ def extract_income_statement(company_short, pdf_path):
     out["Investment Yield"] = extract_investment_yield(pdf_path)
     out["Investment Portfolio"] = extract_investment_portfolio(pdf_path)
     out["Average Claim Size"] = extract_average_claim_size(pdf_path)
+    out["NL-45 Claims"] = (extract_nl45_claims(pdf_path), None)
+    out["CSR Amount"] = (extract_nl37_amount_csr(pdf_path), None)
+    out["NL-45 Complaint Ratios"] = extract_nl45_complaint_ratios(pdf_path)  # (policy, claim), not (cur, prior)
+    out["IT Capex"] = (lakhs_to_cr(extract_it_capex(pdf_path)), None)
+    out["Office Counts"] = extract_office_counts(pdf_path)  # (opening, closing), not (cur, prior)
     out["Cumulative Capital"] = extract_cumulative_capital(pdf_path)
 
     return out
 
 
+# A well-formed figure as these forms print it: Indian ("1,19,190") or plain
+# grouping, optional decimals, optional sign/brackets.
+_WELL_FORMED_NUM_RE = re.compile(r"^\(?-?(?:\d{1,3}(?:,\d{2})*,\d{3}|\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?$")
+
+
 def _nl31_cell_num(row, idx):
     if idx >= len(row) or row[idx] is None:
         return None
-    s = re.sub(r"\s+", "", str(row[idx])).replace("%", "").replace(",", "")
-    if s in ("", "-"):
+    raw = " ".join(str(row[idx]).replace("%", "").split())
+    if raw in ("", "-"):
         return None
+    joined = raw.replace(" ", "")
+    # pdfplumber splits one figure across a stray space ("4 ,93,346") - and
+    # occasionally merges two adjacent cells into one ("7,194 167": Star
+    # Health's NL-31 investment 7,194 with its income 167). Joining is right
+    # for the first and 1000x wrong for the second, so only join when the
+    # result is itself well-formed; otherwise take the first figure.
+    if not _WELL_FORMED_NUM_RE.match(joined) and " " in raw:
+        first = raw.split(" ")[0]
+        if _WELL_FORMED_NUM_RE.match(first):
+            joined = first
+    s = joined.replace(",", "")
+    neg = s.startswith("(") and s.endswith(")")
     try:
-        return float(s)
+        v = float(s.strip("()"))
     except ValueError:
         return None
+    return -v if neg else v
 
 
 def _nl31_table_and_blocks(pdf_path):
@@ -1175,7 +1224,11 @@ def _nl31_table_and_blocks(pdf_path):
                 prior_start = i if prior_start is None else min(prior_start, i)
             else:
                 cur_start = i if cur_start is None else min(cur_start, i)
-    if cur_start is None or prior_start is None:
+    # Only the current block is required. ABHI's third block is "Upto the
+    # Year Ended 31st March <cur year>" - the previous FULL year, not the
+    # same period last year - so no prior block is found and prior_start
+    # stays None (the prior is then backfilled from last year's Data Engine).
+    if cur_start is None:
         return None, None, None
     return table, cur_start, prior_start
 
@@ -1203,6 +1256,8 @@ def extract_investment_yield(pdf_path):
             total_row = table[-1]
 
         def yield_at(block_start):
+            if block_start is None:
+                return None
             # Preferred: the row's own precomputed Gross Yield sub-column.
             pct = _nl31_cell_num(total_row, block_start + 2)
             if pct is not None:
@@ -1234,6 +1289,9 @@ def extract_investment_yield(pdf_path):
 CATEGORY_CODE_TO_BUCKET = {
     "CGSB": "Govt Bonds", "CGSL": "Govt Bonds", "CTRB": "Govt Bonds",
     "SGGB": "Govt Bonds", "SGGL": "Govt Bonds",
+    # Sovereign Green Bonds (Care Health), Special Deposits, Deposit under
+    # Sec 7 of the Insurance Act (Star Health) - all central-government paper.
+    "CSGB": "Govt Bonds", "CSPD": "Govt Bonds", "CDSS": "Govt Bonds",
     "SGOA": "Corporate Bonds/Debentures", "HTDN": "Corporate Bonds/Debentures",
     "HTDA": "Corporate Bonds/Debentures", "HTLN": "Corporate Bonds/Debentures",
     "HTHD": "Corporate Bonds/Debentures", "ICCP": "Corporate Bonds/Debentures",
@@ -1295,87 +1353,366 @@ def extract_investment_portfolio(pdf_path):
         return {}
 
     cur_by_bucket, prior_by_bucket = {}, {}
+    total_row = None
     for row in table:
+        cells = [" ".join(str(c).split()).upper() for c in row if c]
+        if cells and cells[0] in ("TOTAL", "GRAND TOTAL") and total_row is None:
+            total_row = row
         code = row[code_col] if code_col < len(row) and row[code_col] else None
         if not code:
             continue
         code = " ".join(str(code).split()).strip().upper()
-        bucket = CATEGORY_CODE_TO_BUCKET.get(code)
-        if bucket is None:
-            RESOLUTION_LOG.append(f"NL-31 category code {code!r} not in CATEGORY_CODE_TO_BUCKET - excluded from Slide 24")
+        if code == "CATEGORY CODE":  # the header row itself
             continue
         cur_v = _nl31_cell_num(row, cur_start)
-        prior_v = _nl31_cell_num(row, prior_start)
+        prior_v = _nl31_cell_num(row, prior_start) if prior_start is not None else None
+        bucket = CATEGORY_CODE_TO_BUCKET.get(code)
+        if bucket is None:
+            # Only worth a warning when the row actually carries money.
+            if cur_v or prior_v:
+                RESOLUTION_LOG.append(f"NL-31 category code {code!r} not in CATEGORY_CODE_TO_BUCKET - "
+                                      f"excluded from Slide 27 ({cur_v} / {prior_v} lakh)")
+            continue
         if cur_v is not None:
             cur_by_bucket[bucket] = cur_by_bucket.get(bucket, 0) + cur_v
         if prior_v is not None:
             prior_by_bucket[bucket] = prior_by_bucket.get(bucket, 0) + prior_v
+
+    # Reconcile with the form's own TOTAL row: a mismatch means a code
+    # missing from CATEGORY_CODE_TO_BUCKET or a misread cell.
+    if total_row is not None:
+        for label, start, by_bucket in (("current", cur_start, cur_by_bucket), ("prior", prior_start, prior_by_bucket)):
+            printed = _nl31_cell_num(total_row, start) if start is not None else None
+            summed = sum(by_bucket.values())
+            if printed and abs(summed - printed) > 0.005 * printed:
+                RESOLUTION_LOG.append(f"NL-31 {label} buckets sum to {summed:,.0f} lakh but the form's TOTAL "
+                                      f"is {printed:,.0f} - Slide 27 may be incomplete ({pdf_path})")
     return {b: (lakhs_to_cr(cur_by_bucket.get(b)), lakhs_to_cr(prior_by_bucket.get(b)))
             for b in INVESTMENT_PORTFOLIO_BUCKETS if b in cur_by_bucket or b in prior_by_bucket}
 
 
+def _nl39_blocks(tables):
+    """Every Line-of-Business block on NL-39, as (claims_count, amount_lakhs)
+    summed across ALL of that block's line-of-business rows (Health, PA,
+    Travel and any other line the insurer writes).
+
+    A block starts at a header row naming the "Total No. of claims paid" /
+    "Total amount of claims paid" columns - located by that text on each
+    block's own header, since the column positions (like every position on
+    this form) vary by insurer. Filers lay the quarter and year-to-date
+    blocks out differently: two separate tables (Care, ManipalCigna - which
+    also prints a leading title-only table), or two row groups in one table
+    (ABHI), or a single block (Niva Bupa's Q1) - so every table is scanned
+    and split on those header rows."""
+    blocks = []
+    for table in tables:
+        cur = None
+        for row in table:
+            cells = [" ".join(str(c).split()).lower() if c else "" for c in row]
+            count_col = next((i for i, t in enumerate(cells) if "total no" in t and "claims paid" in t), None)
+            amount_col = next((i for i, t in enumerate(cells) if "total amount" in t and "claims paid" in t), None)
+            if count_col is not None and amount_col is not None:
+                cur = {"count_col": count_col, "amount_col": amount_col, "count": 0.0, "amount": 0.0}
+                blocks.append(cur)
+                continue
+            if cur is None:
+                continue
+            # Skip any printed total row so it isn't counted on top of the
+            # line-of-business rows it sums.
+            if any("total" in t for t in cells[:cur["count_col"]]):
+                continue
+            count = _nl31_cell_num(row, cur["count_col"])
+            if count is None:
+                continue
+            cur["count"] += count
+            cur["amount"] += _nl31_cell_num(row, cur["amount_col"]) or 0
+    return [(b["count"], b["amount"]) for b in blocks]
+
+
 def extract_average_claim_size(pdf_path):
     """ACS = Total amount of claims paid / Total no. of claims paid, from
-    NL-39 (Ageing of Claims) - verified against a real filing: NL-39 has a
-    "Health" line-of-business row (this pipeline covers health insurers)
-    with its own grand-total "Total No. of claims paid"/"Total amount of
-    claims paid" columns, located by their own header text since their
-    position (like every column/row position on this form) varies by
-    insurer - see the two shift-related comments below.
+    NL-39 (Ageing of Claims), summed across every line of business - the
+    company-level figure, not Health alone (Health-only understated CARE's
+    and ABHI's, whose PA/Travel claims are few but large).
 
-    Some insurers' NL-39 (e.g. Niva Bupa's Q1 filing) prints only a single,
-    quarter-only block with no cumulative phrasing at all - genuinely no
-    YTD column to prefer. Others (e.g. ABHI's Q4 filing) repeat the WHOLE
-    Line-of-Business block twice as separate ROW groups, not a column
-    block like every other form here: "FOR THE QUARTER ENDED ..." then a
-    second "FOR THE YEAR ENDED ..." block further down the same table -
-    the cumulative block is preferred when one exists, matching this
-    pipeline's YTD convention everywhere else.
+    Year-to-date, matching this pipeline's convention everywhere else. In
+    Q2-Q4 the form prints a quarter block and a year-to-date block; the
+    YTD one is the block with the most claims (it contains the quarter's),
+    which picks it however the filer labels or lays the two out. In Q1 both
+    blocks are identical.
 
     Returns (acs_cur, None) in Rs. (an average claim size, not a portfolio
     total, so not converted via lakhs_to_cr) - current period only, since
-    even the cumulative block found has no prior-year comparative on this
-    form."""
-    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-39")
+    the form has no prior-year comparative."""
+    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-39", all_matches=True)
     if not fp:
         return None, None
-    table = fp.tables[0]
-
-    count_col = amount_col = None
-    for row in table[:8]:
-        for i, cell in enumerate(row):
-            if not cell:
-                continue
-            text = " ".join(str(cell).split()).lower()
-            if "total no" in text and "claims paid" in text:
-                count_col = i
-            elif "total amount" in text and "claims paid" in text:
-                amount_col = i
-    if count_col is None or amount_col is None:
+    blocks = [b for b in _nl39_blocks(fp.tables) if b[0]]
+    if not blocks:
         return None, None
+    count, amount_lakhs = max(blocks, key=lambda b: b[0])
+    return round_half_up(amount_lakhs * 1e5 / count, 2), None
 
-    cumulative_start = None
-    for i, row in enumerate(table):
-        cell = next((c for c in row if c), None)
-        if cell and _is_cumulative_header(" ".join(str(cell).split())):
-            cumulative_start = i
+
+_NL14_PAGE_RE = re.compile(r"NL\s*-?\s*14\b")
+# IT hardware ("Information Technology", "IT Equipments", "Computers") and IT
+# intangibles ("Software", "Website", "Intangibles" - in these filings an
+# intangible is software, and Goodwill is always its own row).
+_NL14_IT_ROW_RE = re.compile(r"information\s*technology|\bit\s+equip|computer|software|website|intangible",
+                             re.IGNORECASE)
+_NL14_EXCLUDE_ROW_RE = re.compile(r"goodwill|work\s*in\s*progress|total|previous", re.IGNORECASE)
+
+
+def extract_it_capex(pdf_path):
+    """IT spend = the Additions to IT hardware and IT intangibles in the
+    period, from NL-14 (Fixed Assets schedule), Rs. Lakhs.
+
+    NL-14 isn't in pdf_cache.FORM_PATTERNS (the balance sheet only cites it
+    as a schedule reference), so its page is found by "NL-14" + "Fixed
+    Asset" + "Additions" together. The Additions column is located from
+    each table's own header row - some filers leave cells blank, and a
+    fixed "second value" would read the wrong column. Summed rows are those
+    naming IT hardware or intangibles; a group header such as NBHI's bare
+    "Intangibles" over "a) Software's"/"b) Website" carries no values, so
+    nothing is counted twice.
+
+    Current period only - NL-14 has no prior-year Additions column (the
+    prior is backfilled from last year's Data Engine). Returns None if the
+    schedule or its Additions column isn't found."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    for page in doc["pages"]:
+        text = page["text"] or ""
+        if not (_NL14_PAGE_RE.search(text) and re.search(r"fixed\s+asset", text, re.IGNORECASE)
+                and re.search(r"additions", text, re.IGNORECASE)):
+            continue
+        total, found = 0.0, False
+        for table in page["tables"]:
+            add_col = None
+            for row in table:
+                cells = [" ".join(str(c).split()) if c is not None else "" for c in row]
+                col = next((i for i, c in enumerate(cells) if c.lower().startswith("addition")), None)
+                if col is not None:
+                    add_col = col
+                    continue
+                label = next((c for c in cells if c), "")
+                if add_col is None or not _NL14_IT_ROW_RE.search(label) or _NL14_EXCLUDE_ROW_RE.search(label):
+                    continue
+                if add_col < len(cells) and cells[add_col]:
+                    v = parse_num(cells[add_col])
+                    if v is not None:
+                        total += v
+                        found = True
+        if found:
+            return total
+    return None
+
+
+_NL41_OPENING_RE = re.compile(r"offices?\s+at\s+the\s+beginning", re.IGNORECASE)
+_NL41_CLOSING_RE = re.compile(r"(?:branches|offices)\s+at\s+the\s+end", re.IGNORECASE)
+
+
+def extract_office_counts(pdf_path):
+    """(offices at the beginning, branches at the end) of the period, from
+    NL-41's Office Information table (rows 1 and 6) - read by label, since
+    filers word the period "year" or "period". Either is None if its row
+    isn't found. Searched on every page mentioning NL-41, as some filers
+    print the form without a "FORM" prefix."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    opening = closing = None
+    for page in doc["pages"]:
+        if "NL-41" not in (page["text"] or ""):
+            continue
+        for table in page["tables"]:
+            for row in table:
+                cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                if len(cells) < 2:
+                    continue
+                label = " ".join(cells[:-1])
+                if opening is None and _NL41_OPENING_RE.search(label):
+                    opening = parse_num(cells[-1])
+                elif closing is None and _NL41_CLOSING_RE.search(label):
+                    closing = parse_num(cells[-1])
+        if opening is not None and closing is not None:
             break
-    rows = table[cumulative_start:] if cumulative_start is not None else table
+    return opening, closing
 
-    for row in rows:
-        # "Line of Business"'s own column position varies by insurer (Niva
-        # Bupa: index 1; ABHI: index 2, since ABHI's table has an extra
-        # leading blank column shifting everything right, same issue as
-        # extract_investment_portfolio's Category Code column) - so match
-        # "Health" against any cell in the row instead of a fixed position.
-        is_health_row = any(cell and " ".join(str(cell).split()).strip().lower() == "health" for cell in row)
-        if is_health_row:
-            count = _nl31_cell_num(row, count_col)
-            amount_lakhs = _nl31_cell_num(row, amount_col)
-            if count:
-                return round_half_up(amount_lakhs * 1e5 / count, 2), None
-            return None, None
-    return None, None
+
+_GRIEVANCE_PAGE_RE = re.compile(r"GR(?:IE|EI)VANCE\s+DISPOSAL", re.IGNORECASE)  # Care spells it "GREIVANCE"
+_NL45_CLAIMS_ROW_RE = re.compile(r"no\.?\s*of\s*claims\s*during", re.IGNORECASE)
+
+
+def extract_nl45_complaint_ratios(pdf_path):
+    """(policy complaints per 10,000 policies, claim complaints per 10,000
+    claims) - NL-45 items 6 and 7, current period, as the filer prints
+    them. Picked by item number, like extract_nl45_claims: the wording
+    varies ("Claim Complaints", Narayana's "Claim Grievance"), and ABHI's
+    table has a merged cell spanning items 2-7. ABHI also prints a second,
+    blank block, so the first non-zero value wins. Either is None if its
+    row isn't found."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    found = {}
+    for page in doc["pages"]:
+        if not _GRIEVANCE_PAGE_RE.search(page["text"] or ""):
+            continue
+        for table in page["tables"]:
+            for row in table:
+                cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                if len(cells) < 3 or not re.search(r"per\s*10,?000", " ".join(cells[1:-1]), re.IGNORECASE):
+                    continue
+                for item in ("6", "7"):
+                    if item in cells and item not in found:
+                        value = _nl31_cell_num(cells, len(cells) - 1)
+                        if value:
+                            found[item] = value
+        if found:
+            break
+    return found.get("6"), found.get("7")
+
+
+# NL-37 prints a "No. of claims" block then an amount block (Rs. lakh),
+# each opening with "Claims O/S at the beginning". Headings differ by
+# filer: "(Amount in Rs. Lakhs)", "(Rs in Lakhs)" (ManipalCigna), "Amt of
+# Claim (In lakhs)" (Narayana, whose amount block is on the next, untagged
+# page).
+_NL37_BLOCK_START_RE = re.compile(r"o/s\s+at\s+the\s+begin", re.IGNORECASE)
+_NL37_COUNT_HEAD_RE = re.compile(r"no\.?\s*of\s*claims|nos?\s+of\s+claim", re.IGNORECASE)
+_NL37_AMOUNT_HEAD_RE = re.compile(r"amount\s+in|amt\s+of\s+claim|rs\.?\s*in\s+lakh", re.IGNORECASE)
+_NL37_AGEING_RE = re.compile(r"less\s+than\s+3|3\s*months?\s+to\s+6|6\s*months?\s+to\s+1|1\s*(?:year|period)\s+and\s+above",
+                             re.IGNORECASE)
+
+
+def _nl37_block_totals(rows):
+    """(os_start, reported, settled, os_end) from one NL-37 block, given as
+    [(label, total_value)] in order. A blank/zero total row falls back to
+    the sum of its own sub-rows (Care Health leaves "reported", "settled"
+    and "O/S at end" blank and fills only (a)/(b)/(c) or the ageing rows)."""
+    def find(pattern):
+        return next((i for i, (lab, _) in enumerate(rows) if re.search(pattern, lab, re.IGNORECASE)), None)
+
+    i_start, i_rep = find(r"o/s\s+at\s+the\s+begin"), find(r"reported\s+during")
+    i_set, i_rep_rej = find(r"settled\s+during"), find(r"repudiated\s+during")
+    i_end = find(r"o/s\s+at\s+end")
+
+    def total(i, sub_from, sub_to, sub_filter=None):
+        own = rows[i][1] if i is not None else None
+        if own:
+            return own
+        lo = (i + 1) if i is not None else sub_from
+        subs = [v for lab, v in rows[lo:sub_to] if v is not None and (sub_filter is None or sub_filter(lab))]
+        return sum(subs) if subs else own
+
+    os_start = rows[i_start][1] if i_start is not None else None
+    reported = total(i_rep, None, i_set)
+    settled = total(i_set, None, i_rep_rej)
+    ageing_from = i_end if i_end is not None else (i_rep_rej or 0)
+    os_end = total(i_end, ageing_from, len(rows), lambda lab: bool(_NL37_AGEING_RE.search(lab)))
+    return os_start, reported, settled, os_end
+
+
+def _nl37_text_value(line):
+    """Last figure on an NL-37 text line (its Total column)."""
+    line = re.sub(r"(\d)\s+([.,]\d)", r"\1\2", line)
+    nums = re.findall(r"\(?-?\d[\d,]*\.?\d*\)?", line)
+    return parse_num(nums[-1]) if nums else None
+
+
+def extract_nl37_amount_csr(pdf_path):
+    """Claim Settlement Ratio by AMOUNT - the Slide 23 formula applied to
+    NL-37's amount block: settled / (O/S at beginning + reported - O/S at
+    end), from the Total column, year to date.
+
+    Blocks are found in the page text (headings tell count from amount,
+    and quarter from year-to-date where a filer prints both - ABHI); values
+    come from the matching table block where the tables have it (cell-level
+    parsing handles pdfplumber's split digits), else from the text line.
+    Returns None if no amount block is found."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    idxs = [i for i, p in enumerate(doc["pages"]) if "NL-37" in p["forms_detected"]]
+    if not idxs:
+        return None
+    pages = [doc["pages"][i] for i in idxs]
+    nxt = idxs[-1] + 1
+    if nxt < len(doc["pages"]) and _NL37_BLOCK_START_RE.search(doc["pages"][nxt]["text"] or ""):
+        pages.append(doc["pages"][nxt])
+
+    # Text blocks, each tagged count/amount and quarter/ytd by its nearest heading.
+    lines = [l for p in pages for l in (p["text"] or "").splitlines()]
+    starts = [i for i, l in enumerate(lines) if _NL37_BLOCK_START_RE.search(l)]
+    text_blocks = []
+    for n, s in enumerate(starts):
+        kind, heading = None, ""
+        for j in range(s - 1, max(s - 15, -1), -1):
+            if _NL37_AMOUNT_HEAD_RE.search(lines[j]):
+                kind, heading = "amount", lines[j]
+                break
+            if _NL37_COUNT_HEAD_RE.search(lines[j]):
+                kind, heading = "count", lines[j]
+                break
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        rows = [(l, _nl37_text_value(l)) for l in lines[s:end]]
+        text_blocks.append({"kind": kind, "quarter": bool(re.search(r"for\s+the\s+quarter", heading, re.I)),
+                            "rows": rows})
+
+    # Table blocks, in page order, split at each "O/S at the beginning" row.
+    table_blocks = []
+    for p in pages:
+        for t in p["tables"]:
+            for row in t:
+                cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                if not cells:
+                    continue
+                label = next((c for c in cells if re.search(r"[A-Za-z]", c)), "")
+                if _NL37_BLOCK_START_RE.search(label):
+                    table_blocks.append([])
+                if table_blocks and label:
+                    last = cells[-1]
+                    value = None if re.search(r"[A-Za-z]", last) else _nl31_cell_num(cells, len(cells) - 1)
+                    table_blocks[-1].append((label, value))
+
+    amount_idx = [i for i, b in enumerate(text_blocks) if b["kind"] == "amount"]
+    if not amount_idx:
+        return None
+    pick = next((i for i in amount_idx if not text_blocks[i]["quarter"]), amount_idx[-1])
+    rows = table_blocks[pick] if len(table_blocks) == len(text_blocks) else text_blocks[pick]["rows"]
+    os_start, reported, settled, os_end = _nl37_block_totals(rows)
+    if settled is None or os_start is None or reported is None:
+        return None
+    denom = os_start + reported - (os_end or 0)
+    return round_half_up(settled / denom, 4) if denom else None
+
+
+def extract_nl45_claims(pdf_path):
+    """Total no. of claims during the current year - NL-45 (Grievance
+    Disposal) item 5, the company's own year-to-date claim count across
+    every line of business.
+
+    NL-45 isn't in pdf_cache.FORM_PATTERNS (not every filer prints "FORM
+    NL-45" on the page), so the page is found by its "Grievance Disposal"
+    heading plus a claims row. Items 2-5 print previous-year policies,
+    previous-year claims, current policies, current claims; the label text
+    varies ("current year", "current period", "period ended June 30, 2026",
+    "current year: 30th June 2026"), so the row is picked by its item
+    number, 5, rather than its wording. Some filers (ABHI) print a second,
+    all-blank block for intermediary complaints - the first non-zero value
+    wins. Returns the count, or None if the page or row isn't found."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    for page in doc["pages"]:
+        if not _GRIEVANCE_PAGE_RE.search(page["text"] or ""):
+            continue
+        for table in page["tables"]:
+            for row in table:
+                cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                if "5" not in cells or not any(_NL45_CLAIMS_ROW_RE.search(c) for c in cells):
+                    continue
+                value = parse_num(cells[-1])
+                if value:
+                    return value
+    return None
 
 
 def _snapshot_cols(fp):
@@ -1388,7 +1725,12 @@ def _snapshot_cols(fp):
     data, which "last two columns" silently misreads as the prior-period
     value instead (confirmed against a real filing: Share Capital's
     prior-year value came back None because of this)."""
-    table = fp.tables[0]
+    return _snapshot_cols_for_table(fp.tables[0])
+
+
+def _snapshot_cols_for_table(table):
+    """_snapshot_cols for one table - for a form whose figures sit in a
+    table other than the page's first (ManipalCigna's NL-10)."""
     cur_col = prior_col = None
     cur_frag, prior_frag = pdf_extract_year_frags()
     for row in table[:5]:
@@ -1424,47 +1766,97 @@ def _bs_row(fp, *label_substrings):
     return _nl31_cell_num(row, cur_col), _nl31_cell_num(row, prior_col)
 
 
+_SERIAL_RE = re.compile(r"^\d{1,2}\.?$")
+_SP_CLOSING_RE = re.compile(r"at\s+the\s+end|closing\s+balance", re.IGNORECASE)
+_SP_OPENING_RE = re.compile(r"opening\s+balance|at\s+the\s+begin", re.IGNORECASE)
+_SP_LESS_RE = re.compile(r"\bless\b|utili[sz]ed|deduction", re.IGNORECASE)
+_SP_ADD_RE = re.compile(r"\badd\b|addition", re.IGNORECASE)
+
+
+def _row_values(row, cur_col, prior_col):
+    """(cur, prior) of one snapshot-table row - from the header-located
+    columns when known, else the row's last two filled numeric cells. A
+    blank cell is None (not 0), so a valueless group header adds nothing."""
+    def val(cell):
+        text = " ".join(str(cell).split()) if cell is not None else ""
+        return parse_num(text) if text else None
+    if cur_col is not None and prior_col is not None:
+        return (val(row[cur_col]) if cur_col < len(row) else None,
+                val(row[prior_col]) if prior_col < len(row) else None)
+    nums = [v for v in (val(c) for c in row) if v is not None]
+    return (nums[-2], nums[-1]) if len(nums) >= 2 else (None, None)
+
+
+def _share_premium(tables):
+    """(cur, prior) Share Premium balance at the period end, from NL-10.
+
+    The block runs from the row naming "Share Premium" to the next numbered
+    item (e.g. "4 General Reserves"), searched across every table on the
+    page (ManipalCigna's sits in the second). Rows are read by label, not
+    position: filers print it as a valueless "Share Premium" header over
+    opening/additions rows (NBHI, CARE, ManipalCigna), with a closing row
+    too (ABHI), or with the opening value on the "Share Premium at the
+    beginning" row itself (Star Health), or as that one row alone carrying
+    the balance (Star Health's Q4). The printed closing balance is used
+    when present; otherwise opening + additions - deductions; otherwise the
+    "Share Premium" row's own values."""
+    for table in tables:
+        start = next((i for i, row in enumerate(table)
+                      if any(c and "share premium" in " ".join(str(c).split()).lower() for c in row)), None)
+        if start is None:
+            continue
+        cur_col, prior_col = _snapshot_cols_for_table(table)
+        own = _row_values(table[start], cur_col, prior_col)
+        parts = {"opening": [None, None], "add": [None, None], "less": [None, None], "closing": [None, None]}
+        for ridx in range(start, len(table)):
+            row = table[ridx]
+            first = next((" ".join(str(c).split()) for c in row if c and str(c).strip()), "")
+            if ridx != start and _SERIAL_RE.match(first):
+                break
+            label = " ".join(" ".join(str(c).split()) for c in row
+                             if c and re.search(r"[A-Za-z]", str(c)))
+            kind = ("closing" if _SP_CLOSING_RE.search(label) else
+                    "less" if _SP_LESS_RE.search(label) else
+                    "add" if _SP_ADD_RE.search(label) else
+                    "opening" if _SP_OPENING_RE.search(label) else None)
+            if kind is None:
+                continue
+            for i, v in enumerate(_row_values(row, cur_col, prior_col)):
+                if v is not None:
+                    parts[kind][i] = (parts[kind][i] or 0) + v
+        result = []
+        for i in (0, 1):
+            if parts["closing"][i] is not None:
+                result.append(parts["closing"][i])
+            elif any(parts[k][i] is not None for k in ("opening", "add", "less")):
+                result.append((parts["opening"][i] or 0) + (parts["add"][i] or 0)
+                              - abs(parts["less"][i] or 0))
+            else:
+                result.append(own[i])
+        return tuple(result)
+    return None, None
+
+
 def extract_cumulative_capital(pdf_path):
     """Cumulative Capital = Share Capital + Share Application Money Pending
-    Allotment (both on NL-3 itself) + Share Premium (NL-10's "Opening
-    Balance" + "Additions during the period" sub-rows under its own "Share
-    Premium" parent row - taken positionally by row offset, since "Opening
-    Balance"/"Additions during the period" alone each match more than one
-    reserve type in this same schedule, verified against a real filing)."""
+    Allotment (both NL-3) + Share Premium (NL-10's period-end balance - see
+    _share_premium). A gridline-less NL-3 (Narayana Health) is read from its
+    page text instead: its lines print "<label> <schedule ref> <current>
+    <prior>", the IRDAI balance-sheet column order."""
     nl3, _ = get_form_page(pdf_path, r"FORM\s+NL-3-B-BS")
-    if not nl3:
-        return None, None
-    share_capital = _bs_row(nl3, "SHARE CAPITAL")
-    share_app_money = _bs_row(nl3, "SHARE APPLICATION MONEY")
+    if nl3:
+        share_capital = _bs_row(nl3, "SHARE CAPITAL")
+        share_app_money = _bs_row(nl3, "SHARE APPLICATION MONEY")
+    else:
+        nl3_text, _ = get_form_text(pdf_path, r"FORM\s+NL-3-B-BS")
+        if not nl3_text:
+            return None, None
+        share_capital = get_line_item_from_text(nl3_text, "Share Capital", cur_col=0, prior_col=1, form="NL-3")
+        share_app_money = get_line_item_from_text(nl3_text, "Share Application Money", cur_col=0, prior_col=1,
+                                                  form="NL-3")
 
-    share_premium_opening = share_premium_additions = (None, None)
-    nl10, _ = get_form_page(pdf_path, r"FORM\s+NL-10")
-    if nl10:
-        table = nl10.tables[0]
-        cur_col, prior_col = _snapshot_cols(nl10)
-        for ridx, row in enumerate(table):
-            # "Share Premium" itself is a parent row (own values blank) -
-            # its label's column position varies by insurer (Niva Bupa:
-            # index 1; ABHI: index 2, same leading-column-shift issue as
-            # elsewhere in this file), so match against any cell rather
-            # than a fixed position.
-            is_share_premium_row = any(
-                cell and " ".join(str(cell).split()).strip() == "Share Premium" for cell in row)
-            if is_share_premium_row:
-                if cur_col is not None and prior_col is not None and ridx + 1 < len(table):
-                    r1 = table[ridx + 1]
-                    share_premium_opening = (_nl31_cell_num(r1, cur_col), _nl31_cell_num(r1, prior_col))
-                if cur_col is not None and prior_col is not None and ridx + 2 < len(table):
-                    r2 = table[ridx + 2]
-                    share_premium_additions = (_nl31_cell_num(r2, cur_col), _nl31_cell_num(r2, prior_col))
-                break
-
-    def _sum_opt(*vals):
-        present = [v for v in vals if v is not None]
-        return sum(present) if present else None
-
-    share_premium_cur = _sum_opt(share_premium_opening[0], share_premium_additions[0])
-    share_premium_prior = _sum_opt(share_premium_opening[1], share_premium_additions[1])
+    nl10, _ = get_form_page(pdf_path, r"FORM\s+NL-10", all_matches=True)
+    share_premium_cur, share_premium_prior = _share_premium(nl10.tables) if nl10 else (None, None)
 
     def combine(sc, sam, sp):
         # Share Capital is the mandatory base term (no Cumulative Capital
@@ -1571,7 +1963,12 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
     else:
         gross_comm = ri_comm_accepted = ri_comm_ceded = net_comm = (None, None)
 
-    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7")
+    # all_matches: some filers (Star Health, Galaxy Health) print NL-7's
+    # prior-year block as a second page with its own headers - reading only
+    # the first page left every prior-period opex (and the UW/Combined/
+    # Expense figures derived from it) blank. Each page's columns are
+    # resolved from its own period headers, so the two years don't mix.
+    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7", all_matches=True)
     opex = get_segment_line_item(nl7, segment, "TOTAL") if nl7 else (None, None)
 
     def _add(a, b):
@@ -1679,6 +2076,11 @@ COMPANY_FULL_NAME = {
 # as a fraction of that channel's own premium, NL-6 / NL-36.
 SLIDE13_RATE_METRIC1 = "Channel-wise Commission % to Channel Premium"
 
+# Slide 23's "No. of claims to No. of policies" inputs, written alongside the
+# ratio so a reviewer can check it (the report doesn't chart them).
+SLIDE23_CLAIMS_METRIC1 = "Total no. of claims (NL-45)"
+SLIDE23_POLICIES_METRIC1 = "Total no. of policies (NL-36)"
+
 
 def normalize_text(s):
     if s is None:
@@ -1755,7 +2157,16 @@ PRIOR_BACKFILL_TARGETS = (
     + [(17, s, None) for s in ("Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana",
                                 "Tamil Nadu", "Kerala", "Delhi", "Others")]
     + [(23, m, None) for m in ("Average Claim Size", "No. of claims to No. of policies",
-                                "Claims Settlement Ratio")]
+                                "Claims Settlement Ratio",
+                                # Written current-period only, so their prior
+                                # comes from the same place as the ratio's.
+                                "Total no. of claims (NL-45)", "Total no. of policies (NL-36)")]
+    + [(24, "IT spend to GWP ratio", None)]
+    + [(30, m, None) for m in ("Claim Settlement Ratio (Amount)", "Claim Complaints per 10,000 claims",
+                                "Policy Complaints per 10,000 policies")]
+    # Only fills a gap - e.g. ABHI's NL-31 has no same-period prior block.
+    + [(27, b, None) for b in ("Govt Bonds", "Corporate Bonds/Debentures", "Deposits",
+                                "Equity/Invits/REIT", "Mutual Funds")]
     + [(25, m, None) for m in ("Manpower cost per employee", "Facility rental per office per month")]
 )
 
@@ -1910,22 +2321,40 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     D[(22, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
     D[(22, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
     D[(22, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
-    D[(31, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
-    D[(31, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
-    D[(32, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
-    D[(32, "Expense of Management Ratio", None)] = (eom_ratio_cur, eom_ratio_prior)
+    D[(32, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
+    D[(32, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
+    D[(33, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
+    D[(33, "Expense of Management Ratio", None)] = (eom_ratio_cur, eom_ratio_prior)
 
     # Slide 24: expense ratios to GWP
     manpower_cur, manpower_prior = get("manpower_cost")
-    it_cur, it_prior = get("it_spend")
+    # Manpower cost net of half the in-house claim processing cost (NL-7,
+    # where a filer reports one) - that share of staff cost is claims
+    # handling, not operating overhead. Feeds every manpower row (Slides
+    # 24/25); no line, no change.
+    in_house_cur, in_house_prior = income.get("in_house_claims_cost", (None, None))
+    if manpower_cur is not None and in_house_cur:
+        manpower_cur = round_half_up(manpower_cur - 0.5 * in_house_cur, 2)
+    if manpower_prior is not None and in_house_prior:
+        manpower_prior = round_half_up(manpower_prior - 0.5 * in_house_prior, 2)
+    # IT spend = NL-14 Additions to IT hardware + IT intangibles (see
+    # extract_it_capex), not NL-7's IT expense line. Current period only -
+    # the prior is backfilled from last year's Data Engine.
+    it_cur, _ = income.get("it_capex", (None, None))
     D[(24, "Opex. To GWP ratio", None)] = (safe_div(opex_alone_cur, gwp_cur), safe_div(opex_alone_prior, gwp_prior))
     D[(24, "Manpower to GWP ratio", None)] = (safe_div(manpower_cur, gwp_cur), safe_div(manpower_prior, gwp_prior))
-    D[(24, "IT spend to GWP ratio", None)] = (safe_div(it_cur, gwp_cur), safe_div(it_prior, gwp_prior))
+    D[(24, "IT spend to GWP ratio", None)] = (safe_div(it_cur, gwp_cur), None)
 
     # Slide 25: manpower/facility metrics (Rs. Lakhs, not Rs. - verified
     # against GT)
     employees_cur, _ = get("employees_onroll")
-    offices_cur, _ = get("offices_count")
+    # Offices = the average of NL-41's opening and closing counts for the
+    # period (rent accrues across the whole period, over which the office
+    # count changes). Falls back to whichever count exists, then to the
+    # model's closing count.
+    opening_offices, closing_offices = income.get("office_counts", (None, None))
+    counts = [c for c in (opening_offices, closing_offices) if c]
+    offices_cur = sum(counts) / len(counts) if counts else get("offices_count")[0]
     D[(25, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
     if manpower_cur is not None and employees_cur:
         D[(25, "Manpower cost per employee", None)] = (round_half_up(manpower_cur * 100 / employees_cur, 4), None)
@@ -1972,7 +2401,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     D[(26, "Capital", None)] = income.get("cumulative_capital", (None, None))
 
     # Slide 30: Historical Trends duplicate GWP/PBT from Slide 18
-    D[(30, "GWP", None)] = (gwp_cur, gwp_prior)
+    D[(31, "GWP", None)] = (gwp_cur, gwp_prior)
     # Slides 26/30's PBT rows repeat Slide 18's cumulative PBT, for every
     # company without exception. An earlier version substituted the
     # single-quarter figure here for the one insurer whose NL-2 has no ruled
@@ -1980,13 +2409,13 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # filing's column order, which get_line_item_from_text now reads from the
     # form's own header instead.
     pbt2327_cur, pbt2327_prior = pbt_cur, pbt_prior
-    D[(30, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
+    D[(31, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
     # Slide 26 also has its own PBT row (alongside Capital/Net Worth) - same figure.
     D[(26, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
 
     # Slide 35: Investment Yield, read directly off NL-31's own TOTAL row
     # (see extract_investment_yield) - not computed here.
-    D[(35, "Investment Yield", None)] = income.get("investment_yield", (None, None))
+    D[(36, "Investment Yield", None)] = income.get("investment_yield", (None, None))
 
     # Slide 27: Investment Portfolio, read directly off NL-31's per-category
     # rows summed by bucket (see extract_investment_portfolio) - not computed here.
@@ -1996,12 +2425,12 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # Slide 33: reinsurance ratios (current period only - NL-33 has no prior-year column)
     ri_ceded_cur, _ = get("ri_ceded_total")
     ri_comm_cur, _ = get("ri_commission")
-    D[(33, "RI Ceding to GWP Ratio", "Risk Ceded")] = (safe_div(ri_ceded_cur, gwp_cur), None)
-    D[(33, "RI Commission to RI Ceding", "Risk Ceded")] = (safe_div(ri_comm_cur, ri_ceded_cur), None)
+    D[(34, "RI Ceding to GWP Ratio", "Risk Ceded")] = (safe_div(ri_ceded_cur, gwp_cur), None)
+    D[(34, "RI Commission to RI Ceding", "Risk Ceded")] = (safe_div(ri_comm_cur, ri_ceded_cur), None)
 
     # Slide 34: ROE = PAT / Average Net Worth (current period only)
     if pat_cur is not None and nw_cur is not None and nw_prior is not None and (nw_cur + nw_prior) != 0:
-        D[(34, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round_half_up(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
+        D[(35, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round_half_up(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
 
     # Slide 13: despite the "% to GDPI" label, GT wants the absolute
     # commission amount in Rs. Lakhs, not a computed ratio - verified
@@ -2141,8 +2570,24 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # paid, read directly off NL-39 (see extract_average_claim_size) -
     # current-quarter only, since NL-39 itself has no YTD/prior-year column.
     D[(23, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
-    if reported_cur is not None and total_policies_cur:
-        D[(23, "No. of claims to No. of policies", None)] = (round_half_up(reported_cur / total_policies_cur, 6), None)
+    # No. of claims to No. of policies = NL-45's total claims (current year,
+    # item 5) / NL-36's total policies (up to the quarter, every channel).
+    # Current period only - the prior value is backfilled from last year's
+    # own Data Engine (PRIOR_BACKFILL_TARGETS).
+    # Slide 30: claims & grievances, current period only (read directly off
+    # NL-37's amount block and NL-45 items 6/7); the prior is backfilled
+    # from last year's Data Engine.
+    D[(30, "Claim Settlement Ratio (Amount)", None)] = income.get("csr_amount", (None, None))
+    policy_complaints, claim_complaints = income.get("complaint_ratios", (None, None))
+    D[(30, "Claim Complaints per 10,000 claims", None)] = (claim_complaints, None)
+    D[(30, "Policy Complaints per 10,000 policies", None)] = (policy_complaints, None)
+
+    nl45_claims_cur, _ = income.get("nl45_claims", (None, None))
+    D[(23, SLIDE23_CLAIMS_METRIC1, None)] = (nl45_claims_cur, None)
+    D[(23, SLIDE23_POLICIES_METRIC1, None)] = (total_policies_cur, None)
+    if nl45_claims_cur is not None and total_policies_cur:
+        D[(23, "No. of claims to No. of policies", None)] = (
+            round_half_up(nl45_claims_cur / total_policies_cur, 6), None)
 
     return D
 
@@ -2293,6 +2738,12 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         "gst": inc.get("GST", (None, None)),
         "ceo_remuneration": inc.get("CEO Remuneration", (None, None)),
         "average_claim_size": inc.get("Average Claim Size", (None, None)),
+        "nl45_claims": inc.get("NL-45 Claims", (None, None)),
+        "it_capex": inc.get("IT Capex", (None, None)),
+        "in_house_claims_cost": inc.get("In House Claim Processing Cost", (None, None)),
+        "office_counts": inc.get("Office Counts", (None, None)),
+        "csr_amount": inc.get("CSR Amount", (None, None)),
+        "complaint_ratios": inc.get("NL-45 Complaint Ratios", (None, None)),
         "cumulative_capital": inc.get("Cumulative Capital", (None, None)),
     }
 

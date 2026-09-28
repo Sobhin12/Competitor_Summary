@@ -681,7 +681,7 @@ def get_segment_line_item_any(fp: FormPage, segment, label_variants, cur_year_fr
 
 
 def sum_rows_after(fp: FormPage, anchor_substrings, stop_pattern, table_idx=None,
-                    cur_year_frag=None, prior_year_frag=None):
+                    cur_year_frag=None, prior_year_frag=None, include_anchor=False):
     """Sum every sub-item row's (current, prior) cumulative values nested
     under a GROUP header row - a row that names the group (e.g. NL-2's "(f)
     Contribution to Policyholders' A/c") but carries no values of its own,
@@ -694,7 +694,11 @@ def sum_rows_after(fp: FormPage, anchor_substrings, stop_pattern, table_idx=None
     Sums every row after the anchor until a row whose label matches
     `stop_pattern` (the next top-level lettered item, or a TOTAL row) is
     reached. Returns (None, None) if the anchor isn't found or no sub-row
-    carried a parseable value for a period."""
+    carried a parseable value for a period.
+
+    `include_anchor` also counts the anchor row's own values - for a group
+    some filers print as one already-summed line instead of a valueless
+    header over sub-items (a valueless header adds nothing either way)."""
     if cur_year_frag is None or prior_year_frag is None:
         _cur, _prior = year_frags()
         cur_year_frag = cur_year_frag or _cur
@@ -707,9 +711,9 @@ def sum_rows_after(fp: FormPage, anchor_substrings, stop_pattern, table_idx=None
     events = fp._events(ti)
     cur_total = prior_total = 0.0
     found = False
-    for r in range(anchor_ridx + 1, len(table)):
+    for r in range(anchor_ridx if include_anchor else anchor_ridx + 1, len(table)):
         label = next((c for c in table[r] if c), None)
-        if label and stop_pattern.search(" ".join(str(label).split())):
+        if r != anchor_ridx and label and stop_pattern.search(" ".join(str(label).split())):
             break
         cur_idx, cur_hdr_ridx = _col_for(events, r, cur_year_frag)
         prior_idx, prior_hdr_ridx = _col_for(events, r, prior_year_frag)
@@ -727,6 +731,51 @@ def sum_rows_after(fp: FormPage, anchor_substrings, stop_pattern, table_idx=None
                 prior_total += v
                 found = True
     return (cur_total, prior_total) if found else (None, None)
+
+
+def sum_lines_after_from_text(text, anchor_substrings, stop_pattern, form=""):
+    """sum_rows_after's counterpart for a page with no ruled gridlines (read
+    via get_form_text): sums the cumulative (current, prior) values of every
+    line from the first line containing all `anchor_substrings` - itself
+    included, so a group printed as one summed line still counts - up to
+    the first later line matching `stop_pattern`. Columns resolve from the
+    form's own period header, exactly as get_line_item_from_text does.
+    Returns (None, None) if the anchor isn't found or no line in the group
+    carried a parseable value."""
+    if not text:
+        return None, None
+    cur_col, prior_col = _text_period_columns(text, form=form)
+    if cur_col is None or prior_col is None:
+        _log(f"{form or 'form'}: could not resolve cumulative columns from header "
+             f"text for group {anchor_substrings}; returning no value rather than "
+             f"guessing a column order.")
+        return None, None
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines)
+                  if all(s.lower() in l.lower() for s in anchor_substrings)), None)
+    if start is None:
+        return None, None
+    cur_total = prior_total = 0.0
+    found_cur = found_prior = False
+    for i in range(start, len(lines)):
+        if i != start and stop_pattern.search(lines[i]):
+            break
+        # Drop the anchor's own label text (it can carry a digit, e.g.
+        # "3OTHER INCOME") before the line is tokenized.
+        line = lines[i]
+        if i == start:
+            low = line.lower()
+            for s in anchor_substrings:
+                idx = low.find(s.lower())
+                line, low = line[idx + len(s):], low[idx + len(s):]
+        cur, prior = get_line_item_from_text(line, "", cur_col=cur_col, prior_col=prior_col, form=form)
+        if cur is not None:
+            cur_total += cur
+            found_cur = True
+        if prior is not None:
+            prior_total += prior
+            found_prior = True
+    return (cur_total if found_cur else None, prior_total if found_prior else None)
 
 
 def get_single_value(fp: FormPage, *label_substrings):

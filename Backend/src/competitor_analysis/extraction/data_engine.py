@@ -874,6 +874,14 @@ def lakhs_to_cr(v):
     return round_half_up(v / 100, 2) if isinstance(v, (int, float)) else None
 
 
+# NL-6's reinsurance-accepted commission line, most specific wording first:
+# most filers print "Commission on Re-insurance Accepted", Care Health just
+# "Add: Re-insurance Accepted". NL-6 has no other "accepted" row, so the bare
+# wording can't pick up the wrong line.
+RI_ACCEPTED_COMMISSION_LABELS = [("Commission on Re-insurance Accepted",), ("Re-insurance Accepted",),
+                                 ("Reinsurance Accepted",)]
+
+
 def extract_income_statement(company_short, pdf_path):
     """Returns {metric_label: (fy26_q3_cr, fy25_q3_cr)} for one company."""
     out = {}
@@ -979,19 +987,25 @@ def extract_income_statement(company_short, pdf_path):
     # NL-6 itself (NL-1 nets them away into the single "Commission" line
     # above) - needed for the EOM Ratio formula. Some insurers (e.g.
     # ManipalCigna) don't use the label "Gross Commission" at all - their
-    # NL-6 calls the same line "Direct Commission" instead.
+    # NL-6 calls the same line "Direct Commission" instead. Likewise Care
+    # Health's NL-6 labels the RI-accepted line just "Add: Re-insurance
+    # Accepted" (see RI_ACCEPTED_COMMISSION_LABELS).
     nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
     nl6_text = None
     if nl6 is None:
         nl6_text, _ = get_form_text(pdf_path, r"FORM\s+NL-6")
     if nl6:
         gross_commission = get_line_item_any(nl6, [("Gross Commission",), ("Direct Commission",)])
-        ri_accepted_commission = get_line_item(nl6, "Commission on Re-insurance Accepted")
+        ri_accepted_commission = get_line_item_any(nl6, RI_ACCEPTED_COMMISSION_LABELS)
     elif nl6_text:
         gross_commission = get_line_item_from_text(nl6_text, "Gross Commission", form="NL-6")
         if gross_commission == (None, None):
             gross_commission = get_line_item_from_text(nl6_text, "Direct Commission", form="NL-6")
-        ri_accepted_commission = get_line_item_from_text(nl6_text, "Commission on Re-insurance Accepted", form="NL-6")
+        ri_accepted_commission = (None, None)
+        for (label,) in RI_ACCEPTED_COMMISSION_LABELS:
+            ri_accepted_commission = get_line_item_from_text(nl6_text, label, form="NL-6")
+            if ri_accepted_commission != (None, None):
+                break
     else:
         gross_commission = ri_accepted_commission = (None, None)
     out["Gross Commission"] = tuple(lakhs_to_cr(v) for v in gross_commission)
@@ -1002,7 +1016,8 @@ def extract_income_statement(company_short, pdf_path):
     # Service" (singular, no trailing s on "Service") matches both that
     # wording and ABHI's own "Goods and Service Tax" - confirmed against a
     # real filing that the plural "Services" version misses ABHI entirely.
-    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7")
+    # All NL-7 pages: Star/Galaxy print the prior-year block on a second page.
+    nl7, _ = get_form_page(pdf_path, r"FORM\s+NL-7", all_matches=True)
     nl7_text = None
     if nl7 is None:
         nl7_text, _ = get_form_text(pdf_path, r"FORM\s+NL-7")
@@ -1019,9 +1034,8 @@ def extract_income_statement(company_short, pdf_path):
     # Health; Galaxy prints the line blank). Half of it comes off manpower
     # cost (see compute_derived_metrics). All NL-7 pages, since Star prints
     # its prior-year block on a second page.
-    nl7_all, _ = get_form_page(pdf_path, r"FORM\s+NL-7", all_matches=True)
-    if nl7_all:
-        in_house = get_line_item(nl7_all, "In House Claim Processing")
+    if nl7:
+        in_house = get_line_item(nl7, "In House Claim Processing")
     elif nl7_text:
         in_house = get_line_item_from_text(nl7_text, "In House Claim Processing", form="NL-7")
     else:
@@ -1956,7 +1970,7 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
     nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
     if nl6:
         gross_comm = get_segment_line_item_any(nl6, segment, [("Gross Commission",), ("Direct Commission",)])
-        ri_comm_accepted = get_segment_line_item(nl6, segment, "Commission on Re-insurance Accepted")
+        ri_comm_accepted = get_segment_line_item_any(nl6, segment, RI_ACCEPTED_COMMISSION_LABELS)
         ri_comm_ceded = get_segment_line_item_any(nl6, segment, [("Commission on Re-insurance Ceded",),
                                                                   ("Re-insurance Ceded",), ("Reinsurance Ceded",)])
         net_comm = get_segment_line_item(nl6, segment, "Net Commission")

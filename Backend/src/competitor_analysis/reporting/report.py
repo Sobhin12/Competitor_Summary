@@ -115,21 +115,144 @@ def new_page(title, page_no, n_panels, height_ratios=None, want_insights=False, 
     pass a larger `bottom` to keep the panel's box/legend clear of the
     page-number pennant in the footer."""
     fig = plt.figure(figsize=theme.PAGE_SIZE, dpi=theme.DPI)
-    _header_footer(fig, title, page_no + SLIDE_TO_PAGE_OFFSET)
+    printed_page = page_no + SLIDE_TO_PAGE_OFFSET
+    _header_footer(fig, title, printed_page)
+    hardcoded = []
+    if HARDCODED_INSIGHTS:
+        # The page's insights box holds PAGE_INSIGHTS' text (or nothing), and
+        # the caller's own bullets are ignored - see draw_insights.
+        hardcoded = _wrap_insight_lines(fig, PAGE_INSIGHTS.get(printed_page, []))
+        if hardcoded and not want_insights:
+            # A page laid out without an insights row (e.g. the trend pages)
+            # gets shorter panels once one is added; the gap between them was
+            # sized for the taller ones, so widen it or a panel's legend runs
+            # into the next panel's title.
+            hspace = max(hspace, 0.62)
+        want_insights = bool(hardcoded)
     total_rows = n_panels + (1 if want_insights else 0)
     ratios = list(height_ratios) if height_ratios else [1] * n_panels
     if want_insights:
-        n = 4 if n_insight_lines is None else max(1, min(n_insight_lines, 4))
+        if hardcoded:
+            n = len(hardcoded)
+        else:
+            n = 4 if n_insight_lines is None else max(1, min(n_insight_lines, 4))
         ratios = ratios + [0.10 + 0.055 * n]
     gs = fig.add_gridspec(total_rows, 1, left=0.09, right=0.94, top=0.85, bottom=bottom, hspace=hspace,
                            height_ratios=ratios)
     panel_specs = [gs[i] for i in range(n_panels)]
     insight_spec = gs[n_panels] if want_insights else None
+    if hardcoded:
+        _insight_box(fig, insight_spec, "\n".join(hardcoded))
     return fig, panel_specs, insight_spec
 
 
-def draw_insights(fig, subplot_spec, bullets):
+# While True, every content page's insights box shows PAGE_INSIGHTS' text for
+# that printed page (none if it has no entry) instead of the rule-based
+# bullets each slide function computes - set False to restore those.
+HARDCODED_INSIGHTS = True
+
+# Keyed by PRINTED page number (Data Engine slide + SLIDE_TO_PAGE_OFFSET).
+# Hardcoded for now (Q1'FY27 reference deck) - not derived from the data, so
+# it does NOT follow the reporting period.
+PAGE_INSIGHTS = {
+    4: [  # GI Industry
+        "General Insurance Q1’FY27 growth at 10.9% (Q1’FY26 growth at 8.8%)",
+        "Segment wise growth % : Health & PA: 22.4% (Q1’FY26: 10.3%), Motor: 13.9% (Q1’FY26: 8.7%), "
+        "Fire & Eng: -22.2% (Q1’FY26: 17.6%) & Others: 4.7% (Q1’FY26: -8.4%)",
+        "Insurer wise growth%: Pvt: 11.3%, PSU: 3.6%, SAHI: 32.9%, Specialised Insurers: -30.6% & Overall: 10.9%",
+        "Without 1/n impact: Pvt: 11.4%, PSU: 3.6%, SAHI: 29.5%, Specialised Insurers: -30.6% & Overall: 10.8%",
+    ],
+    5: [  # Health Industry
+        "Health & PA growth Q1’FY27 : 22.4% (SAHI : 32.9%, Pvt. GI : 31.6%, PSU GI: 7.7%)",
+        "Segment wise growth % : Retail: 31.6%, Group: 14.0%, Govt.: 15.2%, Travel: 6.7% & PA: 47.4%",
+        "Retail Health & PA are the only segments with increase in market share from 30.9% to 33.2% and "
+        "9.0% to 10.8% and for Q1’FY27",
+    ],
+    6: ["NBHI & STAR are the only SAHI’s with decrease in market share in Q1’FY27"],  # SAHI Market
+    7: [  # Segment-wise: Health & PA
+        "Retail & Group Health growth at 31.6% & 14.0% in Q1’FY27 (Q1’FY26 Growth: Retail: 9.4% & Group: 9.7%)",
+        "Govt. Health growth at 15% primarily on account of Bajaj (2899%), Reliance GI (8%) & Oriental (53%)",
+    ],
+    8: ["ABHI & CARE have collectively written 72.5% of SAHI PA business & 85.8% of SAHI Travel business "
+        "in Q1’FY27"],  # Segment wise SAHI's share
+    10: [  # Revenue & Growth % (SAHI)
+        "All SAHI’s recorded 20%+ growth (CAGR) over FY18-FY26 ; ABHI CAGR highest at 50%",
+        "ABHI recorded highest growth amongst SAHI’s in Q1’FY27 followed by CARE, NBHI & CIGNA",
+    ],
+    11: ["Group business contributes major proportion for Pvt. & PSU GI players"],  # Segment-wise GDPI: Health
+    12: [  # Segment-wise GDPI Mix - SAHI's
+        "ABHI, CARE & STAR contribution for retail health segment has increased by 5.3%, 2.8% & 2.7% in "
+        "Q1’FY27 as against Q1’FY26",
+        "STAR & NBHI with highest contribution from retail segment amongst all SAHI players",
+    ],
+    13: [  # GDPI by Channel: SAHI's
+        "Agency business growth: NBHI at 43%, STAR at 19%, CARE at 44%, CIGNA at 50% & ABHI at 58%",
+        "Banca business growth: NBHI at 32%, STAR at -24%, CARE at 21%, CIGNA at 8% & ABHI at 21%",
+        "Proprietary channel contribution: NBHI at 45%, STAR at 92%, CARE at 45%, CIGNA at 28% & ABHI at 15%",
+    ],
+    15: ["STAR with highest retail accretion market share across industry at 22.1% for Q1’FY27"],  # Retail Revenue
+    16: [  # ATS
+        "Average realisation for all SAHI’s increased over Q1’FY26",
+        "SAHI agency ATS realisation is highest for CIGNA followed by NBHI and CARE",
+        "All SAHI’s average productivity increased in Q1’FY27 except STAR & ABHI",
+    ],
+    17: ["Highest contribution: NBHI from North Zone, STAR from South Zone and CARE, CIGNA & ABHI from "
+         "West Zone"],  # Geographical Distribution: Zones
+    28: [  # Investment Portfolio
+        "CIGNA & NBHI with highest exposure in Corporate Bonds followed CARE",
+        "NBHI & CARE reduced exposure in Corporate Bonds/Debentures and shifted to Equity / Invits / REIT",
+    ],
+    29: [  # Debt Portfolio: Credit Rating
+        "STAR with highest exposure to AA securities followed by NBHI, CARE & ABHI",
+        "All SAHI’s except CIGNA reduced exposure in Sovereign securities & shifted to AAA rated securities",
+    ],
+}
+
+
+def _wrap_insight_lines(fig, bullets, fontsize=8.5):
+    """The bullets as display lines ("➔" on each bullet's first line), each
+    wrapped to the insights box's width by rendered text width."""
     if not bullets:
+        return []
+    renderer = fig.canvas.get_renderer()
+    max_w = (0.94 - 0.09) * 0.93 * fig.get_figwidth() * fig.dpi
+
+    def fits(s):
+        t = fig.text(0, 0, s, fontsize=fontsize)
+        w = t.get_window_extent(renderer=renderer).width
+        t.remove()
+        return w <= max_w
+
+    lines = []
+    for bullet in bullets:
+        out, cur = [], ""
+        for word in bullet.split():
+            trial = f"{cur} {word}".strip()
+            prefix = "➔  " if not out else "     "
+            if cur and not fits(prefix + trial):
+                out.append(cur)
+                cur = word
+            else:
+                cur = trial
+        out.append(cur)
+        lines += ["➔  " + out[0]] + ["     " + w for w in out[1:]]
+    return lines
+
+
+def _insight_box(fig, subplot_spec, text):
+    ax = fig.add_subplot(subplot_spec)
+    ax.axis("off")
+    box = FancyBboxPatch((0, 0), 1, 1, transform=ax.transAxes, boxstyle="round,pad=0.02,rounding_size=0.03",
+                          linewidth=1, edgecolor=theme.INSIGHT_BORDER, facecolor=theme.INSIGHT_BG,
+                          linestyle=(0, (5, 3)), clip_on=False)
+    ax.add_patch(box)
+    ax.text(0.03, 0.5, text, fontsize=8.5, color=theme.DARK_TEXT, va="center", ha="left", transform=ax.transAxes)
+
+
+def draw_insights(fig, subplot_spec, bullets):
+    """The rule-based insights box. A no-op while HARDCODED_INSIGHTS is on:
+    new_page has already drawn that page's hardcoded text (or no box)."""
+    if HARDCODED_INSIGHTS or not bullets:
         return
     ax = fig.add_subplot(subplot_spec)
     ax.axis("off")
@@ -246,7 +369,11 @@ def glossary_page(pdf, page_no):
         "Average Claim Size and No. of claims to No. of policies are best-effort estimates, not independently ground-truth-verified.",
         f"Sections with no {cfg.cur_period_label()} data for any company are omitted from this report entirely, rather than shown as an empty or placeholder chart.",
         "Company short names: NBHI = Niva Bupa Health Insurance, STAR = Star Health & Allied Insurance, CARE = Care Health Insurance, CIGNA = ManipalCigna Health Insurance, ABHI = Aditya Birla Health Insurance, Narayana = Narayana Health Insurance, Galaxy = Galaxy Health Insurance.",
-        "This report was generated automatically from Data_Engine_UI.xlsx; insight bullets are rule-based auto-generated observations and should be reviewed before external use.",
+        ("This report was generated automatically from Data_Engine_UI.xlsx; insight bullets are analyst-written "
+         "commentary entered separately and should be reviewed before external use."
+         if HARDCODED_INSIGHTS else
+         "This report was generated automatically from Data_Engine_UI.xlsx; insight bullets are rule-based "
+         "auto-generated observations and should be reviewed before external use."),
     ]
     y = 0.82
     for line in lines:

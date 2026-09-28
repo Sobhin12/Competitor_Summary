@@ -33,10 +33,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fy", required=True, help="e.g. FY26")
     parser.add_argument("--quarter", required=True, help="Q1, Q2, Q3 or Q4")
-    parser.add_argument("--stage", default="all", choices=["download", "build", "all"],
+    parser.add_argument("--stage", default="all", choices=["download", "build", "all", "report"],
                          help="download: Phase 1 only, then report what landed on disk. "
                               "build: Phase 2 + 3 against whatever is already in "
-                              "data/downloads/{FY}/{Quarter}/. all: both, back to back.")
+                              "data/downloads/{FY}/{Quarter}/. all: both, back to back. "
+                              "report: Phase 3 only, from an existing Data Engine workbook.")
+    parser.add_argument("--data-engine",
+                         help="--stage report only: the Data Engine .xlsx to render (default: the "
+                              "latest artifacts/output/Data_Engine_{FY}_{Quarter}_*.xlsx).")
     parser.add_argument("--download", choices=["yes", "no"],
                          help="Deprecated alias for --stage: 'yes' => all, 'no' => build.")
     parser.add_argument("--companies",
@@ -144,6 +148,35 @@ def run_build(fy: str, quarter: str) -> dict:
     return summary
 
 
+def run_report(fy: str, quarter: str, data_engine_path: str | None = None) -> str:
+    """Phase 3 only: renders the PDF from an already-filled Data Engine
+    workbook - no downloads, no PDF parsing, no Gemini calls. Defaults to the
+    newest saved workbook for the period. Returns the PDF path."""
+    import glob
+
+    from competitor_analysis import paths
+
+    cfg.set_period(fy, quarter)
+    fy, quarter = cfg.FY, cfg.QUARTER
+    if data_engine_path is None:
+        # Timestamped names (YYYYMMDD_HHMMSS) sort chronologically.
+        matches = sorted(glob.glob(str(paths.OUTPUT_DIR / f"Data_Engine_{fy}_{quarter}_*.xlsx")))
+        if not matches:
+            raise RuntimeError(f"No Data Engine workbook for {fy} {quarter} under {paths.OUTPUT_DIR} - "
+                               f"pass --data-engine PATH, or run --stage build first.")
+        data_engine_path = matches[-1]
+    elif not os.path.isfile(data_engine_path):
+        raise RuntimeError(f"Data Engine workbook not found: {data_engine_path}")
+
+    from competitor_analysis.reporting import report as pdf_report
+
+    with phase("Phase 3"):
+        log.info("Report generation from %s", data_engine_path)
+        out_path = pdf_report.build(cfg.output_pdf_path(), data_engine_path=data_engine_path)
+    log.info("Done: %s", out_path)
+    return out_path
+
+
 def run(fy: str, quarter: str, download: bool, companies: list[str] | None = None) -> dict:
     """Phase 1 (optional) then Phase 2 + 3, in one process."""
     if download:
@@ -163,6 +196,8 @@ def main():
             run_download(args.fy, args.quarter, companies=companies)
         elif stage == "build":
             run_build(args.fy, args.quarter)
+        elif stage == "report":
+            run_report(args.fy, args.quarter, data_engine_path=args.data_engine)
         else:
             run(args.fy, args.quarter, download=True, companies=companies)
     except (ValueError, RuntimeError) as e:

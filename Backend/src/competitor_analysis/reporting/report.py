@@ -40,6 +40,7 @@ from competitor_analysis.reporting import data
 from competitor_analysis.reporting import historical
 from competitor_analysis import config as cfg
 from competitor_analysis import paths
+from competitor_analysis.rounding import fmt_fixed
 from competitor_analysis import logging_setup
 
 log = logging_setup.get_logger(__name__)
@@ -164,15 +165,15 @@ def leader_laggard_bullets(keys, current, prior, kind, metric_name, higher_is_be
     bullets = []
     top = max(pairs, key=lambda x: x[1]) if higher_is_better else min(pairs, key=lambda x: x[1])
     word = "highest" if higher_is_better else "lowest"
-    bullets.append(f"{top[0]} has the {word} {metric_name} at {top[1] * scale:,.1f}{unit}")
+    bullets.append(f"{top[0]} has the {word} {metric_name} at {fmt_fixed(top[1] * scale, 1, grouping=True)}{unit}")
     deltas = [(n, c, p, c - p) for n, c, p in pairs if p is not None]
     if deltas:
         best = max(deltas, key=lambda x: x[3])
         worst = min(deltas, key=lambda x: x[3])
         if best[3] > 1e-9:
-            bullets.append(f"{best[0]} improved the most YoY (+{best[3] * scale:,.1f}{unit})")
+            bullets.append(f"{best[0]} improved the most YoY (+{fmt_fixed(best[3] * scale, 1, grouping=True)}{unit})")
         if worst[3] < -1e-9 and worst[0] != best[0]:
-            bullets.append(f"{worst[0]} declined the most YoY ({worst[3] * scale:,.1f}{unit})")
+            bullets.append(f"{worst[0]} declined the most YoY ({fmt_fixed(worst[3] * scale, 1, grouping=True)}{unit})")
     return bullets[:limit]
 
 
@@ -400,7 +401,7 @@ def slide_06(pdf, rows):
 
     bullets = ["Health-Group is the largest segment for both Private and Public GI players.",
                "SAHI's mix skews more heavily to Health-Retail than Private/Public GI.",
-               "Bars show each segment's own mix (%); the number above a bar is its total GDPI."]
+               "Bars show each segment's own mix (%); above a bar is its total GDPI and YoY growth vs last year."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("Segment-wise: Health & PA", 6, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
@@ -408,7 +409,8 @@ def slide_06(pdf, rows):
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Industry {cfg.cur_period_label()}", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, seg_names, cur_series, colors, pct100=True, show_totals=True, show_yaxis=False)
+        charts.stacked_bar(ax, seg_names, cur_series, colors, pct100=True, show_totals=True, show_yaxis=False,
+                           prior_series=pri_series)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"Industry {cfg.prior_period_label()}", unit_label="INR Crores")
@@ -435,7 +437,7 @@ def slide_07(pdf, rows):
         return
 
     bullets = ["Retail remains the dominant segment across most SAHI players.",
-               "Bars show each segment's own mix (%) across SAHI companies; the number above a bar is its total GDPI."]
+               "Bars show each segment's mix (%) across SAHI companies; above a bar is its total GDPI and YoY growth."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("Segment wise SAHI's share", 7, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
@@ -444,7 +446,8 @@ def slide_07(pdf, rows):
         charts.panel_box(fig, panels[idx], title=f"Segment wise SAHI's share ({cfg.cur_period_label()})",
                           unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, seg_names, cur_series, colors, pct100=True, show_totals=True, show_yaxis=False)
+        charts.stacked_bar(ax, seg_names, cur_series, colors, pct100=True, show_totals=True, show_yaxis=False,
+                           prior_series=pri_series)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"Segment wise SAHI's share ({cfg.prior_period_label()})",
@@ -476,7 +479,7 @@ def slide_08(pdf, rows):
             if r["Company"] in ("Industry Total", "Stand-alone Health sub Total") and r["Meric 1"] == "Growth %":
                 v = data.num(r[data.CUR])
                 if v is not None:
-                    bullets.append(f"{r['Company']} growth %: {v * 100:.1f}%")
+                    bullets.append(f"{r['Company']} growth %: {fmt_fixed(v * 100, 1)}%")
 
     growth_table = historical.get_table("GDPI Growth")
     growth_keys = [k for k in ("SAHI", "Industry") if growth_table and k in growth_table]
@@ -488,12 +491,12 @@ def slide_08(pdf, rows):
     if not keys and not growth_keys:
         return
     n_panels = int(bool(keys)) + int(bool(growth_keys))
-    fig, panels, ins = new_page("Revenue Growth (GDPI)", 8, n_panels, want_insights=bool(bullets),
+    fig, panels, ins = new_page("Revenue & Growth %", 8, n_panels, want_insights=bool(bullets),
                                  hspace=0.5, n_insight_lines=len(bullets[:4]))
     idx = 0
     if keys:
-        panel_title(fig, panels[idx], "Per-company GDPI (Rs. Crore)")
-        charts.grouped_bar(fig, panels[idx], disp_names(keys), prior, current)
+        panel_title(fig, panels[idx], "Revenue Growth (GDPI)")
+        charts.grouped_bar(fig, panels[idx], disp_names(keys), prior, current, show_growth=True)
         idx += 1
     if growth_keys:
         charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
@@ -523,7 +526,8 @@ def slide_09(pdf, rows):
     gdpi_table = historical.get_table("GDPI")
     gdpi_years = historical.sorted_years(gdpi_table) if gdpi_table else []
     cagr_map = historical.cagr(gdpi_table) if gdpi_table else {}
-    cagr_keys = [k for k in data.COMPANY_ORDER if k in cagr_map]
+    # The table's SAHI aggregate row gets its own CAGR bar after the companies.
+    cagr_keys = [k for k in data.COMPANY_ORDER + ["SAHI"] if k in cagr_map]
     cagr_values = [cagr_map[k] for k in cagr_keys]
 
     if not growth_keys and not cagr_keys:
@@ -540,6 +544,32 @@ def slide_09(pdf, rows):
         charts.single_bar(fig, panels[idx], disp_names(cagr_keys), cagr_values, is_percent=True)
     pdf.savefig(fig)
     plt.close(fig)
+
+
+def _segment_abs_total(by_seg, i):
+    """A group's/company's absolute Health+PA GDPI (Rs. Crore) for period
+    index i (0=cur, 1=prior): the sum of its SEG5 values on Slide 6/7, which
+    carry absolute figures. Slides 10/11 store only the resulting mix
+    fractions (verified: each Slide 10/11 share equals that segment's
+    Slide 6/7 value over this sum), so their bar totals come from here.
+    None when no segment has a value."""
+    vals = [by_seg.get(s, (None, None))[i] for s in SEG5]
+    vals = [v for v in vals if v is not None]
+    return sum(vals) if vals else None
+
+
+def _slide8_gdpi_totals(rows, keys, i):
+    """Each company's GDPI (Rs. Crore, from GIC via Slide 8) for period
+    index i (0=cur, 1=prior), aligned to `keys` - the bar total shown on
+    Slides 12/16/17, whose stored values are only mix fractions. Used rather
+    than each slide's own denominator (NL-36 Total (A) / GWP) so a company
+    shows one total across every revenue-mix slide."""
+    gdpi = data.by_company(rows, 8, theme.canonical_company)
+    out = []
+    for k in keys:
+        pair = next((v for (m1, _), v in gdpi.get(k, {}).items() if m1 == "Revenue Growth (GDPI)"), None)
+        out.append(pair[i] if pair else None)
+    return out
 
 
 def slide_10(pdf, rows):
@@ -565,6 +595,13 @@ def slide_10(pdf, rows):
     if not has_cur and not has_pri:
         return
 
+    sahi_abs = data.metric2_by_group(rows, 6, "Company").get("SAHI Market", {})
+
+    def _totals(vals_by_seg, i):
+        return [_segment_abs_total(sahi_abs, i) if g == "SAHI"
+                else sum(v for v in (vals_by_seg[s][j] for s in labels) if v is not None)
+                for j, g in enumerate(groups)]
+
     bullets = ["Segment mix (Retail/Group/Govt./Travel/PA) as a share of each group's own GDPI.",
                "SAHI's mix skews more heavily to Retail than Industry/Pvt. GI/Public GI."]
     n_panels = int(has_cur) + int(has_pri)
@@ -573,15 +610,17 @@ def slide_10(pdf, rows):
     idx = 0
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix ({cfg.cur_period_label()})",
-                          unit_label="% of own GDPI")
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, groups, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, groups, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_totals(cur_series, 0))
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix ({cfg.prior_period_label()})",
-                          unit_label="% of own GDPI")
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, groups, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, groups, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_totals(pri_series, 1))
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -602,19 +641,27 @@ def slide_11(pdf, rows):
     if not has_cur and not has_pri:
         return
 
+    company_abs = data.metric2_by_group(rows, 7, "Company", canonical_fn=theme.canonical_company)
+    cur_totals = [_segment_abs_total(company_abs.get(k, {}), 0) for k in ordered]
+    pri_totals = [_segment_abs_total(company_abs.get(k, {}), 1) for k in ordered]
+
     bullets = ["Segment mix (% of own GDPI) per SAHI company."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("", 11, n_panels, want_insights=True, hspace=0.75, n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix - SAHI's ({cfg.cur_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix - SAHI's ({cfg.cur_period_label()})",
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=cur_totals)
         idx += 1
     if has_pri:
-        charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix - SAHI's ({cfg.prior_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Segment-wise GDPI Mix - SAHI's ({cfg.prior_period_label()})",
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=pri_totals)
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -650,16 +697,21 @@ def slide_12(pdf, rows):
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.cur_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, ordered, 0))
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.prior_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, ordered, 1))
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
 
+
+# Must match data_engine.SLIDE13_RATE_METRIC1 (the template's Meric 1 text).
+COMMISSION_RATE_METRIC1 = "Channel-wise Commission % to Channel Premium"
 
 CHANNEL8 = ["Individual Agents", "Corporate Agents-Banks", "Corporate Agents-Others", "Brokers",
             "CSC", "IMF", "Web Aggregator", "POS"]
@@ -684,9 +736,20 @@ def slide_13(pdf, rows):
     # for this chart's display/totals only, same convention as Slide 23.
     cur_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in cur_series.items()}
     pri_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in pri_series.items()}
+    # Segment labels: each channel's commission as % of that channel's own
+    # premium (NL-6 / NL-36, computed in extraction). Bar heights stay each
+    # channel's share of the company's total commission.
+    cur_rates = {ch: [cdata[k].get((COMMISSION_RATE_METRIC1, ch), (None, None))[0] for k in keys] for ch in CHANNEL8}
+    pri_rates = {ch: [cdata[k].get((COMMISSION_RATE_METRIC1, ch), (None, None))[1] for k in keys] for ch in CHANNEL8}
+    if not any(v is not None for vals in cur_rates.values() for v in vals):
+        # A workbook built before these rows existed: leave segments
+        # unlabelled rather than fall back to share-of-commission %s, which
+        # read as the commission rate and aren't.
+        log.warning("Slide 13: no '%s' rows in this Data Engine - rebuild it to label channel "
+                    "commission rates.", COMMISSION_RATE_METRIC1)
 
-    bullets = ["Individual Agents remain the largest commission channel for most companies.",
-               "Channel mix as % of each company's own total gross commission."]
+    bullets = ["Segment label: channel commission as % of that channel's own premium (NL-6 / NL-36).",
+               "Bar height: channel's share of the company's total commission; the total is above the bar."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("Channel-wise Commission: SAHI's", 13, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
@@ -695,14 +758,16 @@ def slide_13(pdf, rows):
         charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}",
                           unit_label="Rs. Crore")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           segment_pcts=cur_rates)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx],
                           title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}",
                           unit_label="Rs. Crore")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           segment_pcts=pri_rates)
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -779,7 +844,7 @@ def slide_15(pdf, rows):
     historical_trend_page(pdf, "ATS", 15, [
         {"title": "ATS", "unit_label": "Rs. per policy"},
         {"title": "Average Productivity (per agent)", "panel_title": "Average Productivity",
-         "unit_label": "Rs. Lakhs per agent", "value_fmt": lambda v: f"{v:,.2f}"},
+         "unit_label": "Rs. Lakhs per agent", "value_fmt": lambda v: fmt_fixed(v, 2, grouping=True)},
     ])
 
 
@@ -817,12 +882,14 @@ def slide_16(pdf, rows):
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.cur_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, keys, 0))
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.prior_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, keys, 1))
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -850,12 +917,14 @@ def slide_17(pdf, rows):
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.cur_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, keys, 0))
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.prior_period_label()})")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False)
+        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           display_totals=_slide8_gdpi_totals(rows, keys, 1))
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -1106,7 +1175,7 @@ def slide_33(pdf, rows):
 def slide_34(pdf, rows):
     historical_trend_page(pdf, "ROE & Solvency", 34, [
         {"title": "ROE", "is_percent": True, "unit_label": None},
-        {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{v:.2f}x"},
+        {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{fmt_fixed(v, 2)}x"},
     ])
 
 
@@ -1114,7 +1183,7 @@ def slide_35(pdf, rows):
     historical_trend_page(pdf, "Asset Under Management", 35, [
         {"title": "AUM"},
         {"title": "Investment Yield", "is_percent": True, "unit_label": None,
-         "value_fmt": lambda v: f"{v * 100:.1f}%"},
+         "value_fmt": lambda v: f"{fmt_fixed(v * 100, 1)}%"},
     ])
 
 

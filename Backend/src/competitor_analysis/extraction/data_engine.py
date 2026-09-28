@@ -41,6 +41,7 @@ from competitor_analysis.extraction import schemas
 from competitor_analysis import config as cfg
 from competitor_analysis import memory
 from competitor_analysis import paths
+from competitor_analysis.rounding import round_half_up
 
 log = logging_setup.get_logger(__name__)
 
@@ -169,7 +170,7 @@ def growth(cur, prev):
         return None
     if prev == 0:
         return None
-    return round((cur - prev) / prev, 4)
+    return round_half_up((cur - prev) / prev, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +406,7 @@ def build_gic_lookups(gic: GicData):
     # GT's Private + Public == our own General Insurers Sub Total grand
     # total, to the rupee).
     def abs2(v):
-        return round(v, 2) if isinstance(v, (int, float)) else None
+        return round_half_up(v, 2) if isinstance(v, (int, float)) else None
 
     L[(3, "Industry", "Market share", "Private")] = (abs2(private_cur), abs2(private_prev))
     L[(3, "Industry", "Market share", "Public")] = (abs2(public_cur), abs2(public_prev))
@@ -553,7 +554,7 @@ def build_gic_lookups(gic: GicData):
                 return None
             if not total:
                 return 0 if v == 0 else None
-            return round(v / total, 4)
+            return round_half_up(v / total, 4)
 
         return {
             "Retail": (frac(retail[0], total_cur), frac(retail[1], total_prev)),
@@ -649,16 +650,16 @@ def build_gic_lookups(gic: GicData):
         prev = company_health_incl_pa(gic_label, "prev")
         # Same absolute-value convention as Slides 3/4 (see abs2 above).
         L[(5, "SAHI Market", "Market share", slide5_metric2[gic_label])] = (
-            round(cur, 2) if cur is not None else None,
-            round(prev, 2) if prev is not None else None,
+            round_half_up(cur, 2) if cur is not None else None,
+            round_half_up(prev, 2) if prev is not None else None,
         )
         g = growth(cur, prev)
         L[(9, slide9_company[gic_label], "SAHI Growth", "GDPI Growth SAHI")] = (
-            round(g, 4) if g is not None else None, None,
+            round_half_up(g, 4) if g is not None else None, None,
         )
     sahi_g = growth(sahi_total_cur, sahi_total_prev)
-    L[(9, "SAHI", "SAHI Growth", "GDPI Growth SAHI")] = (round(sahi_g, 4) if sahi_g is not None else None, None)
-    L[(9, "SAHI", "GDPI Growth SAHI", "SAHI CAGR")] = (round(sahi_g, 4) if sahi_g is not None else None, None)
+    L[(9, "SAHI", "SAHI Growth", "GDPI Growth SAHI")] = (round_half_up(sahi_g, 4) if sahi_g is not None else None, None)
+    L[(9, "SAHI", "GDPI Growth SAHI", "SAHI CAGR")] = (round_half_up(sahi_g, 4) if sahi_g is not None else None, None)
     # NOTE: rows 93-99 (Metric1="CAGR", Metric2="SAHI CAGR") ask for a true
     # multi-year CAGR, which is not derivable from a single YoY snapshot -
     # intentionally left unmapped/blank rather than guessed.
@@ -674,8 +675,8 @@ def build_gic_lookups(gic: GicData):
     # GT fills the prior-period slot with a literal 0 for these single-period
     # growth-rate rows (no real "prior growth rate" concept here) rather
     # than leaving it blank.
-    L[(8, "Industry Total", "Growth %", "")] = (round(industry_g, 4) if industry_g is not None else None, 0)
-    L[(8, "Stand-alone Health sub Total", "Growth %", "")] = (round(sahi_health_g, 4) if sahi_health_g is not None else None, 0)
+    L[(8, "Industry Total", "Growth %", "")] = (round_half_up(industry_g, 4) if industry_g is not None else None, 0)
+    L[(8, "Stand-alone Health sub Total", "Growth %", "")] = (round_half_up(sahi_health_g, 4) if sahi_health_g is not None else None, 0)
 
     # ---- Slide 14: Retail Revenue / Retail Accretion (GIC-sourced, per company) ----
     slide14_company = {
@@ -692,7 +693,7 @@ def build_gic_lookups(gic: GicData):
         prev = get(hp, gic_label, "Health-Retail", "prev")
         L[(14, short, "Retail Revenue", "")] = (cur, prev)
         if cur is not None and prev is not None:
-            L[(14, short, "Retail Accretion", "Retail Revenue CY-Retail Revenue PY")] = (round(cur - prev, 2), None)
+            L[(14, short, "Retail Accretion", "Retail Revenue CY-Retail Revenue PY")] = (round_half_up(cur - prev, 2), None)
 
     return L
 
@@ -719,9 +720,9 @@ def apply_gic_rows(ws, lookups, dry_run=False, force=False):
             continue
         if not dry_run:
             if cur is not None:
-                ws.cell(row=r, column=COL[CUR]).value = round(cur, 4) if isinstance(cur, float) else cur
+                ws.cell(row=r, column=COL[CUR]).value = round_half_up(cur, 4) if isinstance(cur, float) else cur
             if prev is not None:
-                ws.cell(row=r, column=COL[PRIOR]).value = round(prev, 4) if isinstance(prev, float) else prev
+                ws.cell(row=r, column=COL[PRIOR]).value = round_half_up(prev, 4) if isinstance(prev, float) else prev
             g = growth(cur, prev)
             if g is not None:
                 ws.cell(row=r, column=COL["Growth"]).value = g
@@ -831,9 +832,9 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
             row = rows_for_metric2.get(normalize_text(metric2))
             if row is None:
                 continue
-            frac_cur = (round(cur_lakhs / total_cur, 4)
+            frac_cur = (round_half_up(cur_lakhs / total_cur, 4)
                         if isinstance(cur_lakhs, (int, float)) and total_cur else None)
-            frac_prior = (round(prior_lakhs / total_prior, 4)
+            frac_prior = (round_half_up(prior_lakhs / total_prior, 4)
                           if isinstance(prior_lakhs, (int, float)) and total_prior else None)
             write_cell(row, frac_cur, frac_prior)
 
@@ -861,7 +862,7 @@ def assert_channel_mix_sums(ws, tolerance=0.005):
         # A company with no channel data at all (every share blank) is
         # reported separately rather than as a sum-to-zero failure.
         if len(vals) < 6 or abs(total - 1.0) > tolerance:
-            failures.append((company, period, round(total, 6), len(vals)))
+            failures.append((company, period, round_half_up(total, 6), len(vals)))
     return failures
 
 
@@ -870,7 +871,7 @@ def assert_channel_mix_sums(ws, tolerance=0.005):
 # ---------------------------------------------------------------------------
 
 def lakhs_to_cr(v):
-    return round(v / 100, 2) if isinstance(v, (int, float)) else None
+    return round_half_up(v / 100, 2) if isinstance(v, (int, float)) else None
 
 
 def extract_income_statement(company_short, pdf_path):
@@ -1210,7 +1211,7 @@ def extract_investment_yield(pdf_path):
             # derive it from the same row's Investment/Income sub-columns.
             income = _nl31_cell_num(total_row, block_start + 1)
             investment = _nl31_cell_num(total_row, block_start)
-            return round(income / investment, 4) if income is not None and investment else None
+            return round_half_up(income / investment, 4) if income is not None and investment else None
 
         return yield_at(cur_start), yield_at(prior_start)
 
@@ -1218,8 +1219,8 @@ def extract_investment_yield(pdf_path):
     if not text:
         return None, None
     cur, prior = get_line_item_from_text(text, "TOTAL", cur_col=6, prior_col=10)
-    return (round(cur / 100, 4) if cur is not None else None,
-            round(prior / 100, 4) if prior is not None else None)
+    return (round_half_up(cur / 100, 4) if cur is not None else None,
+            round_half_up(prior / 100, 4) if prior is not None else None)
 
 
 # Slide 24: NL-31 lists investments as ~20-55 granular "Category of
@@ -1372,7 +1373,7 @@ def extract_average_claim_size(pdf_path):
             count = _nl31_cell_num(row, count_col)
             amount_lakhs = _nl31_cell_num(row, amount_col)
             if count:
-                return round(amount_lakhs * 1e5 / count, 2), None
+                return round_half_up(amount_lakhs * 1e5 / count, 2), None
             return None, None
     return None, None
 
@@ -1674,6 +1675,11 @@ COMPANY_FULL_NAME = {
 }
 
 
+# Slide 13's second row set (Data Engine "Meric 1"): each channel's commission
+# as a fraction of that channel's own premium, NL-6 / NL-36.
+SLIDE13_RATE_METRIC1 = "Channel-wise Commission % to Channel Premium"
+
+
 def normalize_text(s):
     if s is None:
         return ""
@@ -1687,13 +1693,13 @@ def convert_value(v, kind):
     if v is None or not isinstance(v, (int, float)):
         return None
     if kind == "money":
-        return round(v / 100, 2)
+        return round_half_up(v / 100, 2)
     if kind == "percent":
-        return round(v / 100, 4)
+        return round_half_up(v / 100, 4)
     if kind == "ratio":
-        return round(v, 4)
+        return round_half_up(v, 4)
     if kind == "count":
-        return round(v)
+        return round_half_up(v)
     return v
 
 
@@ -1849,7 +1855,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     def safe_div(a, b):
         if a is None or b is None or b == 0:
             return None
-        return round(a / b, 4)
+        return round_half_up(a / b, 4)
 
     gwp_cur, gwp_prior = income.get("gwp", (None, None))
     opex_cur, opex_prior = income.get("opex", (None, None))
@@ -1922,7 +1928,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     offices_cur, _ = get("offices_count")
     D[(25, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
     if manpower_cur is not None and employees_cur:
-        D[(25, "Manpower cost per employee", None)] = (round(manpower_cur * 100 / employees_cur, 4), None)
+        D[(25, "Manpower cost per employee", None)] = (round_half_up(manpower_cur * 100 / employees_cur, 4), None)
     rent_cur, rent_prior = get("rent_expense")
     if rent_cur is not None and offices_cur:
         # Rent is a cumulative YTD figure, so the monthly run-rate divides by
@@ -1930,7 +1936,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         # Q3, but 3/6/12 for Q1/Q2/Q4) - never a hardcoded 9.
         months = cfg.months_elapsed()
         D[(25, "Facility rental per office per month", None)] = (
-            round(rent_cur * 100 / months / offices_cur, 4), None)
+            round_half_up(rent_cur * 100 / months / offices_cur, 4), None)
 
     # Slide 23: Net Worth = Share Capital + Reserves&Surplus - Debit balance
     # in P&L Account (per the authoritative formula sheet - no Fair Value
@@ -1943,7 +1949,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     def net_worth(cap, res, dr):
         if cap is None or res is None:
             return None
-        return round(cap + res - (dr or 0), 2)
+        return round_half_up(cap + res - (dr or 0), 2)
 
     nw_cur = net_worth(cap_cur, res_cur, dr_cur)
     nw_prior = net_worth(cap_prior, res_prior, dr_prior)
@@ -1951,8 +1957,8 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # matches GT for 5 of 7 companies within 1%; Capital/Reserves are
     # otherwise correctly extracted, this is purely a unit mismatch).
     D[(26, "Net Worth", None)] = (
-        round(nw_cur * 100, 2) if nw_cur is not None else None,
-        round(nw_prior * 100, 2) if nw_prior is not None else None,
+        round_half_up(nw_cur * 100, 2) if nw_cur is not None else None,
+        round_half_up(nw_prior * 100, 2) if nw_prior is not None else None,
     )
 
     # Slide 26's "Capital" row = Cumulative Capital = Share Capital + Share
@@ -1995,7 +2001,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
 
     # Slide 34: ROE = PAT / Average Net Worth (current period only)
     if pat_cur is not None and nw_cur is not None and nw_prior is not None and (nw_cur + nw_prior) != 0:
-        D[(34, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
+        D[(34, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round_half_up(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
 
     # Slide 13: despite the "% to GDPI" label, GT wants the absolute
     # commission amount in Rs. Lakhs, not a computed ratio - verified
@@ -2007,9 +2013,16 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
             continue
         comm_cur, comm_prior = get(f"commission_ch_{metric2}")
         D[(13, "Channel-wise Gross Commision % to GDPI", gemini_extract.SLIDE13_METRIC2[metric2])] = (
-            round(comm_cur * 100, 2) if comm_cur is not None else None,
-            round(comm_prior * 100, 2) if comm_prior is not None else None,
+            round_half_up(comm_cur * 100, 2) if comm_cur is not None else None,
+            round_half_up(comm_prior * 100, 2) if comm_prior is not None else None,
         )
+        # The channel's commission rate: its NL-6 commission over its own
+        # NL-36 premium (both already Rs. Crore here). The row above stays the
+        # absolute amount - it gives the bar's size and total on the chart -
+        # while this is the % each segment is labelled with.
+        prem_cur, prem_prior = get(f"channel_premium_{metric2}")
+        D[(13, SLIDE13_RATE_METRIC1, gemini_extract.SLIDE13_METRIC2[metric2])] = (
+            safe_div(comm_cur, prem_cur), safe_div(comm_prior, prem_prior))
 
     # Extraction (gemini_extract.STATES) asks NL-34 for every state/UT by
     # name, not just the 7 Slide 17 shows - the rest all feed Slide 16's
@@ -2083,21 +2096,21 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
             if p is not None:
                 others_prior += p
         if any_val:
-            D[(12, "__SLIDE12__" + metric1_12, "Others")] = (round(others_cur, 2), round(others_prior, 2))
+            D[(12, "__SLIDE12__" + metric1_12, "Others")] = (round_half_up(others_cur, 2), round_half_up(others_prior, 2))
 
     # Slide 15: Individual ATS (Rs per policy) and Average Productivity (Rs per agent)
     prem_ia_cur, prem_ia_prior = get("channel_premium_Individual Agents")
     pol_ia_cur, pol_ia_prior = get("channel_policies_Individual Agents")
     D[(15, "Individual ATS", "Individual agents GWP/Individual agents no. of policies")] = (
-        round(prem_ia_cur * 1e7 / pol_ia_cur, 2) if prem_ia_cur and pol_ia_cur else None,
-        round(prem_ia_prior * 1e7 / pol_ia_prior, 2) if prem_ia_prior and pol_ia_prior else None,
+        round_half_up(prem_ia_cur * 1e7 / pol_ia_cur, 2) if prem_ia_cur and pol_ia_cur else None,
+        round_half_up(prem_ia_prior * 1e7 / pol_ia_prior, 2) if prem_ia_prior and pol_ia_prior else None,
     )
     # Rs. Lakhs per agent, using the Individual Agents channel's OWN premium
     # (not total company GWP) - verified exactly against GT.
     agents_cur, _ = get("agents_individual")
     if prem_ia_cur is not None and agents_cur:
         D[(15, "Average Productivity (per agent)", "Premium/No. of Individual Agents")] = (
-            round(prem_ia_cur * 100 / agents_cur, 4), None)
+            round_half_up(prem_ia_cur * 100 / agents_cur, 4), None)
 
     # Slide 23: Claims Settlement Ratio = Claims Settled during the period /
     # (Claims O/S at beginning + Claims reported during the period - Claims
@@ -2129,7 +2142,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # current-quarter only, since NL-39 itself has no YTD/prior-year column.
     D[(23, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
     if reported_cur is not None and total_policies_cur:
-        D[(23, "No. of claims to No. of policies", None)] = (round(reported_cur / total_policies_cur, 6), None)
+        D[(23, "No. of claims to No. of policies", None)] = (round_half_up(reported_cur / total_policies_cur, 6), None)
 
     return D
 

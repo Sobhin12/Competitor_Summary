@@ -15,6 +15,7 @@ from matplotlib.ticker import PercentFormatter
 
 from competitor_analysis.reporting import theme
 from competitor_analysis import config as cfg
+from competitor_analysis.rounding import fmt_fixed, round_half_up
 
 
 def _clean(ax):
@@ -41,8 +42,28 @@ def _num_fmt(v):
     value (e.g. 'Rs. Lakhs per agent' figures around 0.3-1.3) down to 0 or 1,
     destroying all the information a chart like that exists to show."""
     if abs(v) < 10:
-        return f"{v:,.2f}"
-    return f"{v:,.0f}"
+        return fmt_fixed(v, 2, grouping=True)
+    return fmt_fixed(v, 0, grouping=True)
+
+
+GROWTH_UP_COLOR = "#2E7D32"
+GROWTH_DOWN_COLOR = "#C00000"
+
+
+def _growth(cur, prior):
+    """YoY growth fraction, or None when there's no meaningful base (a
+    missing or non-positive prior value)."""
+    if cur is None or prior is None or prior <= 0:
+        return None
+    return cur / prior - 1
+
+
+def _growth_label(g):
+    return f"{'+' if g >= 0 else ''}{fmt_fixed(g * 100, 0)}%"
+
+
+def _growth_color(g):
+    return GROWTH_UP_COLOR if g >= 0 else GROWTH_DOWN_COLOR
 
 
 def _outlier_break(values, ratio_threshold=5):
@@ -136,7 +157,7 @@ def _indian_grouping(n):
     not Western 3-digit grouping (which agrees with it below 1,00,000 but
     diverges above)."""
     sign = "-" if n < 0 else ""
-    s = f"{abs(round(n)):.0f}"
+    s = str(abs(round_half_up(n)))
     if len(s) <= 3:
         return sign + s
     last3, rest = s[-3:], s[:-3]
@@ -247,7 +268,7 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
             ang = math.radians((w.theta1 + w.theta2) / 2)
             x, y = math.cos(ang), math.sin(ang)
             pct = (v / total * 100) if total else 0
-            ax.annotate(f"{name}\n{pct:.1f}%", xy=(x, y), xytext=(1.22 * x, 1.15 * y),
+            ax.annotate(f"{name}\n{fmt_fixed(pct, 1)}%", xy=(x, y), xytext=(1.22 * x, 1.15 * y),
                         ha="left" if x >= 0 else "right", va="center", fontsize=7,
                         color=theme.GREY_TEXT, annotation_clip=False)
 
@@ -282,8 +303,27 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
     return True
 
 
+def _annotate_pair_growth(ax, x, pri, cur, raw_pairs, only_if=None):
+    """Writes each category's YoY growth (current vs prior) centered above
+    its bar pair, clear of the pair's own value labels. `only_if(top)`, if
+    given, restricts labelling to pairs whose taller bar belongs on `ax`
+    (the broken-axis case, so a pair isn't labelled in both panels)."""
+    for xi, p, c, (_, raw_p, raw_c) in zip(x, pri, cur, raw_pairs):
+        g = _growth(raw_c, raw_p)
+        if g is None:
+            continue
+        top = max(p, c, 0)
+        if only_if is not None and not only_if(top):
+            continue
+        ax.annotate(_growth_label(g), (xi, top), textcoords="offset points", xytext=(0, 11),
+                    ha="center", va="bottom", fontsize=6.5, fontweight="bold", color=_growth_color(g))
+
+
 def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, prior_label=None,
-                 current_label=None, is_percent=False, higher_is_better=True):
+                 current_label=None, is_percent=False, higher_is_better=True, show_growth=False):
+    """`show_growth`, if set, labels each category with its current-vs-prior
+    YoY growth % above its pair of bars (money-type metrics - for a ratio
+    metric a change in percentage points is the meaningful figure instead)."""
     prior_label = prior_label or cfg.prior_period_label()
     current_label = current_label or cfg.cur_period_label()
     pairs = [(c, p, cu) for c, p, cu in zip(categories, prior_values, current_values)
@@ -295,7 +335,7 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
     cur = [p[2] if p[2] is not None else 0 for p in pairs]
     x = list(range(len(cats)))
     w = 0.36
-    fmt = (lambda v: f"{v * 100:.1f}%") if is_percent else _num_fmt
+    fmt = (lambda v: f"{fmt_fixed(v * 100, 1)}%") if is_percent else _num_fmt
 
     def _draw(ax):
         b1 = ax.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
@@ -309,10 +349,12 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
         b1, b2 = _draw(ax)
         for bars, vals in ((b1, pri), (b2, cur)):
             ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=6.5, padding=1)
+        if show_growth:
+            _annotate_pair_growth(ax, x, pri, cur, pairs)
         # Extra headroom (vs. the 0.14 default) so the legend - anchored at
         # the very top of the axes - has clear air above the tallest bar's
-        # value label instead of sitting on top of it.
-        _add_headroom(ax, pri + cur, frac=0.30)
+        # value label (and growth label, when shown) instead of sitting on it.
+        _add_headroom(ax, pri + cur, frac=0.40 if show_growth else 0.30)
         ax.set_xticklabels(cats, fontsize=8)
         _style_bar_axes(ax)
         ax.legend(fontsize=7, frameon=False, loc="upper right", bbox_to_anchor=(1.0, 1.02))
@@ -342,6 +384,9 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
     ax_top.bar_label(b2t, labels=[fmt(v) if v > bottom_max else "" for v in cur], fontsize=6.5, padding=1)
     ax_bot.bar_label(b1b, labels=[fmt(v) if v <= bottom_max else "" for v in pri], fontsize=6.5, padding=1)
     ax_bot.bar_label(b2b, labels=[fmt(v) if v <= bottom_max else "" for v in cur], fontsize=6.5, padding=1)
+    if show_growth:
+        _annotate_pair_growth(ax_top, x, pri, cur, pairs, only_if=lambda top: top > bottom_max)
+        _annotate_pair_growth(ax_bot, x, pri, cur, pairs, only_if=lambda top: top <= bottom_max)
     lo = min(0, min(pri + cur))
     _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=lo)
     ax_bot.set_xticks(x)
@@ -361,7 +406,7 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
         return False
     cats = [p[0] for p in pairs]
     vals = [p[1] for p in pairs]
-    fmt = (lambda v: f"{v * 100:.1f}%") if is_percent else _num_fmt
+    fmt = (lambda v: f"{fmt_fixed(v * 100, 1)}%") if is_percent else _num_fmt
 
     brk = _outlier_break(vals)
     if brk is None:
@@ -391,8 +436,29 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
 
 
 def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=True, show_totals=False,
-                 show_yaxis=False, raw_value_labels=False):
+                 show_yaxis=False, raw_value_labels=False, prior_series=None, display_totals=None,
+                 segment_pcts=None):
     """series_dict: {series_name: [value_per_category, ...]}.
+
+    `segment_pcts`, if given (same shape as series_dict), is what each
+    segment is labelled with, as a fraction shown to one decimal place
+    ("12.3%"), instead of its share of the bar - for a chart whose bar
+    heights are one measure (e.g. each channel's share of total commission)
+    but whose segments report another (that channel's commission rate). A
+    None entry leaves that segment unlabelled.
+
+    `display_totals`, if given (aligned to `categories`), is what
+    `show_totals` prints above each bar instead of the bar's own summed
+    total - for a bar whose series are already mix fractions (they sum to 1),
+    whose real absolute total has to come from elsewhere. A None entry gets
+    no total label.
+
+    `prior_series`, if given (same shape as series_dict, aligned to the same
+    `categories`, for the last-year counterpart period), adds each bar's YoY
+    growth % - its absolute total vs. the prior period's total for the same
+    category - on the line beneath the total when `show_totals` is on, or
+    alone above the bar otherwise. A category with no positive prior total
+    gets no growth label.
 
     `show_totals`, if set, annotates each bar's own absolute total (the
     per-category sum across all series, before any pct100 normalization -
@@ -441,27 +507,48 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
             # label unconditionally; only the raw-value branch needs the
             # division to turn `v` into a share at all.
             labels = []
-            for v, tot, rv in zip(vals, totals, raw[name]):
+            for j, (v, tot, rv) in enumerate(zip(vals, totals, raw[name])):
                 share = v if pct100 else (v / tot if tot else 0)
                 if not v or share < 0.04:
                     labels.append("")
+                elif segment_pcts is not None:
+                    pv = (segment_pcts.get(name) or [None] * n)[present[j]]
+                    labels.append(f"{fmt_fixed(pv * 100, 1)}%" if pv is not None else "")
                 elif raw_value_labels:
                     labels.append(_num_fmt(rv))
                 else:
-                    labels.append(f"{v * 100:.0f}%" if pct100 else _num_fmt(v))
+                    labels.append(f"{fmt_fixed(v * 100, 0)}%" if pct100 else _num_fmt(v))
             ax.bar_label(bars, labels=labels, label_type="center", fontsize=6, color="white")
         bottoms = [b + v for b, v in zip(bottoms, vals)]
-    if show_totals:
+    growths = [None] * len(cats)
+    if prior_series:
+        for j, i in enumerate(present):
+            pvals = [vals[i] for vals in prior_series.values() if vals[i] is not None]
+            growths[j] = _growth(sum(raw[name][j] for name in raw), sum(pvals) if pvals else None)
+    show_growth = any(g is not None for g in growths)
+    if display_totals is not None:
+        totals = [display_totals[i] for i in present]
+    if show_totals or show_growth:
         headroom = 0.03 if pct100 else max(bottoms) * 0.03
-        for x, (top, tot) in enumerate(zip(bottoms, totals)):
-            ax.text(x, top + headroom, _indian_grouping(tot), ha="center", va="bottom", fontsize=7.5,
-                    fontweight="bold", color=theme.DARK_TEXT)
+        for x, (top, tot, g) in enumerate(zip(bottoms, totals, growths)):
+            if show_totals and tot is not None:
+                ax.text(x, top + headroom, _indian_grouping(tot), ha="center", va="bottom", fontsize=7.5,
+                        fontweight="bold", color=theme.DARK_TEXT)
+            if g is not None:
+                # Stacked just above the total (offset in points, so it
+                # clears the total's own text height at any axis scale).
+                ax.annotate(_growth_label(g), (x, top + headroom), textcoords="offset points",
+                            xytext=(0, 10 if show_totals else 0), ha="center", va="bottom", fontsize=6.5,
+                            fontweight="bold", color=_growth_color(g))
     ax.tick_params(axis="x", labelsize=7, rotation=0)
+    # Extra room above the bars for the growth line, on top of what the
+    # total alone needs.
+    growth_room = (0.12 if show_totals else 0.10) if show_growth else 0.0
     if pct100:
-        ax.set_ylim(0, 1.16 if show_totals else 1.05)
+        ax.set_ylim(0, (1.16 if show_totals else 1.05) + growth_room)
         ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-    elif show_totals:
-        ax.set_ylim(0, max(bottoms) * 1.12)
+    elif show_totals or show_growth:
+        ax.set_ylim(0, max(bottoms) * (1.12 + growth_room))
     if show_yaxis:
         ax.tick_params(axis="y", labelsize=7)
     else:
@@ -484,7 +571,7 @@ def change_bar(ax, changes, unit="pp"):
     colors = [theme.COMPANY_COLORS.get(k, theme.ORANGE) if v >= 0 else "#C00000" for (k, _), v in zip(pairs, vals)]
     y = range(len(labels))
     bars = ax.barh(list(y), vals, color=colors)
-    ax.bar_label(bars, labels=[f"{'+' if v >= 0 else ''}{v:.1f}{unit}" for v in vals], fontsize=7, padding=3)
+    ax.bar_label(bars, labels=[f"{'+' if v >= 0 else ''}{fmt_fixed(v, 1)}{unit}" for v in vals], fontsize=7, padding=3)
     lo, hi = min(0, min(vals)), max(0, max(vals))
     span = (hi - lo) or (abs(hi) or 1)
     ax.set_xlim(lo - span * 0.18 if lo < 0 else lo, hi + span * 0.18 if hi > 0 else hi)
@@ -532,7 +619,7 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
     non-company series (e.g. SAHI/Industry aggregates), which would
     otherwise all fall back to the same ORANGE default and be indistinguishable.
     Returns False (draws nothing) if every company's series is empty."""
-    fmt = value_fmt or ((lambda v: f"{v * 100:.0f}%") if is_percent else _indian_grouping)
+    fmt = value_fmt or ((lambda v: f"{fmt_fixed(v * 100, 0)}%") if is_percent else _indian_grouping)
     pairs = [(k, company_values.get(k)) for k in company_keys
              if company_values.get(k) and any(v is not None for v in company_values[k])]
     if not pairs:
@@ -600,9 +687,9 @@ def income_table(ax, row_labels, company_keys, values_dict, title, percent_rows=
             if not isinstance(v, (int, float)):
                 row.append("-")
             elif r in percent_rows:
-                row.append(f"{v * 100:.1f}%")
+                row.append(f"{fmt_fixed(v * 100, 1)}%")
             else:
-                row.append(f"{v:,.0f}")
+                row.append(fmt_fixed(v, 0, grouping=True))
         cell_text.append(row)
     n_cols = len(col_labels)
     col_widths = [0.28] + [0.72 / (n_cols - 1)] * (n_cols - 1)

@@ -140,6 +140,12 @@ DERIVED_METRIC_SPECS = [
      "inputs": ["commission_ch_<channel> (NL-6, llm, one per gemini_extract.CHANNELS_36 entry present in gemini_extract.SLIDE13_METRIC2)"],
      "notes": "Despite the '% to GDPI' column label, GT wants the ABSOLUTE commission amount "
               "in Rs. Lakhs here, not a computed ratio - GT-verified exactly."},
+    {"key": "channel_commission_rate_13", "slide": 13, "metric1": "Channel-wise Commission % to Channel Premium",
+     "metric2": "<per NL-36 channel>",
+     "kind": "percent", "source": "derived", "companies": "all",
+     "formula": "compute_derived_metrics: commission_ch_X / channel_premium_X",
+     "inputs": ["commission_ch_<channel> (NL-6, llm)", "channel_premium_<channel> (NL-36, llm)"],
+     "notes": "The % each Slide 13 segment is labelled with; the absolute row above sizes the bars."},
 
     # --- Slide 17: state-wise GDPI share (fraction of company GWP) ---
     {"key": "state_share_17", "slide": 17, "metric1": "<state name>", "metric2": None,

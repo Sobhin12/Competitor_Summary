@@ -21,6 +21,7 @@ import re
 from competitor_analysis.extraction import pdf_cache
 from competitor_analysis import config as cfg
 from competitor_analysis.extraction.pdf_cache import COMPANY_PDFS
+from competitor_analysis.rounding import round_half_up
 
 # Every time a column/period cannot be resolved from a form's own header text
 # and a documented fallback is used instead, the reason is appended here
@@ -916,6 +917,6 @@ def extract_nl36(pdf_path):
         if total is None or any(v is None for v in named):
             others.append(None)
         else:
-            others.append(round(total - sum((v[k] or 0) for v in named), 2))
+            others.append(round_half_up(total - sum((v[k] or 0) for v in named), 2))
     out["others"] = tuple(others)
     return out

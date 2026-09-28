@@ -198,11 +198,11 @@ PAGE_INSIGHTS = {
     ],
     17: ["Highest contribution: NBHI from North Zone, STAR from South Zone and CARE, CIGNA & ABHI from "
          "West Zone"],  # Geographical Distribution: Zones
-    28: [  # Investment Portfolio
+    29: [  # Investment Portfolio
         "CIGNA & NBHI with highest exposure in Corporate Bonds followed CARE",
         "NBHI & CARE reduced exposure in Corporate Bonds/Debentures and shifted to Equity / Invits / REIT",
     ],
-    29: [  # Debt Portfolio: Credit Rating
+    30: [  # Debt Portfolio: Credit Rating
         "STAR with highest exposure to AA securities followed by NBHI, CARE & ABHI",
         "All SAHI’s except CIGNA reduced exposure in Sovereign securities & shifted to AAA rated securities",
     ],
@@ -322,8 +322,8 @@ TOC_ENTRIES = [
     ("Key Highlights", "3"),
     ("Overall Industry & Market share", "4-8"), ("Revenue (Segment, Channel, Geographical mix)", "9-18"),
     ("Income statement", "19"), ("Segment performance (Health, PA, Travel)", "20-22"),
-    ("Key metrics", "23-27"), ("Investment portfolio", "28-30"),
-    ("Claims & grievances", "31"), ("Historical trends", "32-36"), ("AUM", "37-38"),
+    ("Key metrics", "23-28"), ("Investment portfolio", "29-31"),
+    ("Historical trends", "32-36"), ("AUM", "37-38"),
     ("Distribution footprints", "39-40"),
 ]
 
@@ -1316,7 +1316,26 @@ def slide_26(pdf, rows):
 
 
 # ---------------------------------------------------------------------------
-# Slides 27-29: Investment / Debt Portfolio
+# Slide 27: Claims & Grievances - follows the Key Metrics pages (22-26) under
+# the same title. NL-37's amount block and NL-45 items 6/7, current period
+# read from the filing, prior backfilled from last year's Data Engine (see
+# data_engine.PRIOR_BACKFILL_TARGETS).
+# ---------------------------------------------------------------------------
+
+def slide_27(pdf, rows):
+    panels = [
+        {"title": "Claim Settlement Ratio (Amount)", "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
+         "kind": "percent"},
+        {"title": "Claim Complaints per 10,000 claims", "metric1": "Claim Complaints per 10,000 claims",
+         "metric2": None, "kind": "number", "higher_is_better": False},
+        {"title": "Policy Complaints per 10,000 policies", "metric1": "Policy Complaints per 10,000 policies",
+         "metric2": None, "kind": "number", "higher_is_better": False},
+    ]
+    metric_panels_page(pdf, rows, 27, "Key Metrics", 27, panels)
+
+
+# ---------------------------------------------------------------------------
+# Slides 28-30: Investment / Debt Portfolio
 # ---------------------------------------------------------------------------
 
 def _fractions_of_row_total(series_dict, n):
@@ -1361,44 +1380,26 @@ def two_period_stacked_page(pdf, rows, slide_no, title, page_no, series_names, n
     plt.close(fig)
 
 
-def slide_27(pdf, rows):
+def slide_28(pdf, rows):
     series_names = ["Corporate Bonds/Debentures", "Govt Bonds", "Deposits", "Equity/Invits/REIT", "Mutual Funds"]
     # Not normalize=True: these bucket values are already absolute Rs. Crore
     # (extract_investment_portfolio), so stacked_bar's own pct100 does the
     # %-mix conversion. No totals above the bars (removed on request).
-    two_period_stacked_page(pdf, rows, 27, "Investment Portfolio", 27, series_names,
+    two_period_stacked_page(pdf, rows, 28, "Investment Portfolio", 28, series_names,
                              "Investment mix as % of each company's own book value.")
 
 
-def slide_28(pdf, rows):
+def slide_29(pdf, rows):
     series_names = ["Sovereign", "AAA rated", "AA or better", "Rated below AA but above A", "Rated below A"]
-    two_period_stacked_page(pdf, rows, 28, "Debt Portfolio: Credit Rating", 28, series_names,
+    two_period_stacked_page(pdf, rows, 29, "Debt Portfolio: Credit Rating", 29, series_names,
                              "Exposure by credit rating.")
 
 
-def slide_29(pdf, rows):
+def slide_30(pdf, rows):
     series_names = ["Up to 1 year", "More than 1 year and upto 3 years", "More than 3 years and upto 7 years",
                      "More than 7 years and upto 10 years", "Above 10 years"]
-    two_period_stacked_page(pdf, rows, 29, "Debt Portfolio: Residual Maturity", 29, series_names,
+    two_period_stacked_page(pdf, rows, 30, "Debt Portfolio: Residual Maturity", 30, series_names,
                              "Exposure by residual maturity.")
-
-
-# ---------------------------------------------------------------------------
-# Slide 30: Claims & Grievances - NL-37's amount block and NL-45 items 6/7,
-# current period read from the filing, prior backfilled from last year's
-# Data Engine (see data_engine.PRIOR_BACKFILL_TARGETS).
-# ---------------------------------------------------------------------------
-
-def slide_30(pdf, rows):
-    panels = [
-        {"title": "Claim Settlement Ratio (Amount)", "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
-         "kind": "percent"},
-        {"title": "Claim Complaints per 10,000 claims", "metric1": "Claim Complaints per 10,000 claims",
-         "metric2": None, "kind": "number", "higher_is_better": False},
-        {"title": "Policy Complaints per 10,000 policies", "metric1": "Policy Complaints per 10,000 policies",
-         "metric2": None, "kind": "number", "higher_is_better": False},
-    ]
-    metric_panels_page(pdf, rows, 30, "Key Metrics: Claims & Grievances", 30, panels)
 
 
 # ---------------------------------------------------------------------------

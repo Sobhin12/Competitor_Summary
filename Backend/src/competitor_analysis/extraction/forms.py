@@ -816,7 +816,14 @@ def _norm_label(s):
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
 
-def _nl36_blocks(table):
+# _PERIOD_LABEL_RE plus "year": at Q4 some filers (ABHI, Galaxy) head
+# NL-36's cumulative blocks "Upto The Year Ended ...". Kept separate so the
+# shared text-fallback column resolver's behaviour doesn't change.
+_NL36_PERIOD_LABEL_RE = re.compile(
+    r"(up\s*to|upto|for)\s+the\s+(?:corresponding\s+)?(quarter|period|year)", re.I)
+
+
+def _nl36_blocks(table, sub="premium"):
     """Map NL-36's two header rows onto numeric column indices.
 
     NL-36 splits each period into two sub-columns ("No. of Policies" and
@@ -825,12 +832,13 @@ def _nl36_blocks(table):
     first. So the premium column is located by reading the sub-header text,
     never by assuming it is the second of the pair.
 
-    Returns (cur_premium_col, prior_premium_col) as absolute column indices.
+    Returns (cur_col, prior_col) as absolute column indices of the
+    cumulative block's `sub` sub-column: "premium" (default) or "policies".
     """
     period_row = period_cells = None
     for row in table[:6]:
         hits = [(i, " ".join(str(c).split())) for i, c in enumerate(row)
-                if c and _PERIOD_LABEL_RE.search(" ".join(str(c).split()))]
+                if c and _NL36_PERIOD_LABEL_RE.search(" ".join(str(c).split()))]
         if len(hits) >= 2:
             period_row, period_cells = row, hits
             break
@@ -846,22 +854,26 @@ def _nl36_blocks(table):
 
     blocks = []
     for idx, (col, text) in enumerate(period_cells):
-        kind = "cum" if re.search(r"up\s*to|upto", text, re.I) else "qtr"
+        # "For the Period/Year ended" is cumulative too (CIGNA FY24-25 Q4).
+        kind = "cum" if re.search(r"up\s*to|upto|\bperiod\b|\byear\b", text, re.I) else "qtr"
         end = period_cells[idx + 1][0] if idx + 1 < len(period_cells) else len(period_row)
         blocks.append((kind, col, end, text))
+
+    label_re = re.compile(r"polic" if sub == "policies" else r"premium", re.I)
 
     def premium_col(start, end):
         if sub_row:
             for c in range(start, min(end, len(sub_row))):
-                if sub_row[c] and "premium" in str(sub_row[c]).lower():
+                if sub_row[c] and label_re.search(str(sub_row[c])):
                     return c
         # No readable sub-header (text extraction occasionally drops the
-        # "Premium" label entirely) - fall back to the pair's second column,
-        # which is the layout every filing but Narayana's uses.
-        _log("NL-36: no readable 'Premium' sub-header in columns "
-             f"{start}-{end}; defaulting to the second column of the pair "
-             "because that is the majority layout.")
-        return start + 1
+        # label entirely) - fall back to the pair's second column for
+        # premium / first for policies, the layout every filing but
+        # Narayana's uses.
+        _log(f"NL-36: no readable '{sub}' sub-header in columns "
+             f"{start}-{end}; defaulting to the majority layout "
+             "(policies, then premium).")
+        return start + 1 if sub == "premium" else start
 
     cum = [(b, premium_col(b[1], b[2])) for b in blocks if b[0] == "cum"]
     if len(cum) < 2:
@@ -883,6 +895,28 @@ def _nl36_blocks(table):
         cur_col = cum[0][1] if cur_col is None else cur_col
         prior_col = cum[1][1] if prior_col is None else prior_col
     return cur_col, prior_col
+
+
+def extract_nl36_policies(pdf_path):
+    """(cur, prior) total number of policies, up to the quarter - NL-36's
+    own Grand Total (A+B) row (Total (A) if a filing prints no Grand Total),
+    read from the "No. of Policies" sub-column. This is every channel,
+    Direct Business/MISP/Micro included - summing the named channels
+    misses those. (None, None) if not found."""
+    fp, _ = get_form_page(pdf_path, r"FORM\s+NL-36")
+    if fp is None or not fp.tables:
+        return None, None
+    table = max(fp.tables, key=len)
+    cur_col, prior_col = _nl36_blocks(table, sub="policies")
+    if cur_col is None:
+        return None, None
+    found = {}
+    for row in table:
+        label = _norm_label(next((str(c) for c in row[:3] if c and re.search(r"[A-Za-z]", str(c))), ""))
+        for key in ("grandtotal", "totala"):
+            if label.startswith(key) and key not in found:
+                found[key] = tuple(parse_num(row[c]) if c < len(row) else None for c in (cur_col, prior_col))
+    return found.get("grandtotal") or found.get("totala") or (None, None)
 
 
 def extract_nl36(pdf_path):

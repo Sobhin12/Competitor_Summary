@@ -508,11 +508,11 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
     """series_dict: {series_name: [value_per_category, ...]}.
 
     `segment_pcts`, if given (same shape as series_dict), is what each
-    segment is labelled with, as a fraction shown to one decimal place
-    ("12.3%"), instead of its share of the bar - for a chart whose bar
-    heights are one measure (e.g. each channel's share of total commission)
-    but whose segments report another (that channel's commission rate). A
-    None entry leaves that segment unlabelled.
+    segment is labelled with, as a fraction shown as a whole percent
+    ("12%"), instead of its share of the bar - e.g. slide 13, whose segments
+    are sized by the channel commission rates themselves (normalized to a
+    full bar) and labelled with the rates as-is. A None entry leaves that
+    segment unlabelled.
 
     `display_totals`, if given (aligned to `categories`), is what
     `show_totals` prints above each bar instead of the bar's own summed
@@ -580,7 +580,7 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
                     labels.append("")
                 elif segment_pcts is not None:
                     pv = (segment_pcts.get(name) or [None] * n)[present[j]]
-                    labels.append(f"{fmt_fixed(pv * 100, 1)}%" if pv is not None else "")
+                    labels.append(f"{fmt_fixed(pv * 100, 0)}%" if pv is not None else "")
                 elif raw_value_labels:
                     labels.append(_num_fmt(rv))
                 else:
@@ -655,8 +655,7 @@ def change_bar(ax, changes, unit="%"):
 
 
 def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=None, unit_label="INR Crore",
-                 is_percent=False, value_fmt=None, gap=0.14, pad=0.12, stretch=0.4, colors=None,
-                 provisional_from=None):
+                 is_percent=False, value_fmt=None, gap=0.14, pad=0.12, stretch=0.4, colors=None):
     """One horizontal LANE per company (stacked top-to-bottom in
     `company_keys` order), rather than every company sharing one y-axis. A
     shared axis flattens whichever companies are far smaller than the
@@ -690,9 +689,6 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
     `colors`, if given, overrides theme.COMPANY_COLORS per key - for a
     non-company series (e.g. SAHI/Industry aggregates), which would
     otherwise all fall back to the same ORANGE default and be indistinguishable.
-    `provisional_from`, if given, is the index in `years` from which points
-    are the in-progress period (e.g. "Q1 FY27" after full years): drawn
-    hollow, joined by a dashed line, so they read as not yet a full year.
     Returns False (draws nothing) if every company's series is empty."""
     fmt = value_fmt or ((lambda v: f"{fmt_fixed(v * 100, 0)}%") if is_percent else _indian_grouping)
     pairs = [(k, company_values.get(k)) for k in company_keys
@@ -721,18 +717,8 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
             return y0 + pad + frac * (lane_h - 2 * pad)
 
         label = theme.COMPANY_DISPLAY_NAME.get(k, k)
-        solid = [(xi, v) for xi, v in pts if provisional_from is None or xi < provisional_from]
-        extra = [(xi, v) for xi, v in pts if provisional_from is not None and xi >= provisional_from]
-        if solid:
-            ax.plot([xi for xi, _ in solid], [norm(v) for _, v in solid], marker="o", markersize=3.5,
-                    linewidth=1.6, color=color, label=label)
-        if extra:
-            # The in-progress quarter: dashed connector, hollow marker.
-            link = solid[-1:] + extra
-            ax.plot([xi for xi, _ in link], [norm(v) for _, v in link], linestyle="--", linewidth=1.2,
-                    color=color, marker=None, label=None if solid else label)
-            ax.plot([xi for xi, _ in extra], [norm(v) for _, v in extra], linestyle="none", marker="o",
-                    markersize=4.5, markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.3)
+        ax.plot([xi for xi, _ in pts], [norm(v) for _, v in pts], marker="o", markersize=3.5,
+                linewidth=1.6, color=color, label=label)
         for xi, v in pts:
             ax.annotate(fmt(v), (xi, norm(v)), textcoords="offset points", xytext=(0, 6),
                         ha="center", fontsize=7.5, color=theme.DARK_TEXT)

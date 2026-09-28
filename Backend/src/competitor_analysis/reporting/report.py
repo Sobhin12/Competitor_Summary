@@ -715,9 +715,9 @@ def slide_08(pdf, rows):
 
     growth_table = historical.get_table("GDPI Growth")
     growth_keys = [k for k in ("SAHI", "Industry") if growth_table and k in growth_table]
-    growth_years = growth_values = growth_prov = None
+    growth_years = growth_values = None
     if growth_keys:
-        growth_years, growth_values, growth_prov = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
+        growth_years, growth_values = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
 
     if not keys and not growth_keys:
         return
@@ -732,7 +732,7 @@ def slide_08(pdf, rows):
     if growth_keys:
         charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
                             title="SAHI vs Health Industry (Growth)", is_percent=True, unit_label=None,
-                            colors=theme.SEGMENT_COLORS, provisional_from=growth_prov)
+                            colors=theme.SEGMENT_COLORS)
     draw_insights(fig, ins, bullets[:4])
     pdf.savefig(fig)
     plt.close(fig)
@@ -749,9 +749,9 @@ def slide_09(pdf, rows):
     company, not a year-by-year series."""
     growth_table = historical.get_table("GDPI Growth")
     growth_keys = [k for k in data.COMPANY_ORDER if growth_table and k in growth_table]
-    growth_years = growth_values = growth_prov = None
+    growth_years = growth_values = None
     if growth_keys:
-        growth_years, growth_values, growth_prov = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
+        growth_years, growth_values = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
 
     gdpi_table = historical.get_table("GDPI")
     gdpi_years = historical.sorted_years(gdpi_table) if gdpi_table else []
@@ -767,8 +767,7 @@ def slide_09(pdf, rows):
     idx = 0
     if growth_keys:
         charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
-                            title="GDPI Growth % (YoY)", is_percent=True, unit_label=None,
-                            provisional_from=growth_prov)
+                            title="GDPI Growth % (YoY)", is_percent=True, unit_label=None)
         idx += 1
     if cagr_keys:
         charts.panel_box(fig, panels[idx], title=f"GDPI CAGR ({gdpi_years[0]}-{gdpi_years[-1]})")
@@ -967,9 +966,10 @@ def slide_13(pdf, rows):
     # for this chart's display/totals only, same convention as Slide 23.
     cur_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in cur_series.items()}
     pri_series = {ch: [v * 0.01 if v is not None else None for v in vals] for ch, vals in pri_series.items()}
-    # Segment labels: each channel's commission as % of that channel's own
-    # premium (NL-6 / NL-36, computed in extraction). Bar heights stay each
-    # channel's share of the company's total commission.
+    # Each channel's commission as % of that channel's own premium (NL-6 /
+    # NL-36, computed in extraction). Matching the reference deck, segments
+    # are SIZED by these rates (normalized to a full bar) and labelled with
+    # them; the total above the bar is the company's gross commission.
     cur_rates = {ch: [cdata[k].get((COMMISSION_RATE_METRIC1, ch), (None, None))[0] for k in keys] for ch in CHANNEL8}
     pri_rates = {ch: [cdata[k].get((COMMISSION_RATE_METRIC1, ch), (None, None))[1] for k in keys] for ch in CHANNEL8}
     if not any(v is not None for vals in cur_rates.values() for v in vals):
@@ -979,8 +979,24 @@ def slide_13(pdf, rows):
         log.warning("Slide 13: no '%s' rows in this Data Engine - rebuild it to label channel "
                     "commission rates.", COMMISSION_RATE_METRIC1)
 
-    bullets = ["Segment label: channel commission as % of that channel's own premium (NL-6 / NL-36).",
-               "Bar height: channel's share of the company's total commission; the total is above the bar."]
+    def rate_bars(amounts, rates):
+        """(series, segment labels, totals above bars): rate-sized segments
+        when the rates exist, else (older workbook) commission-share
+        segments with no labels."""
+        totals = [sum(v for v in (amounts[ch][j] for ch in CHANNEL8) if v is not None) or None
+                  for j in range(len(keys))]
+        if not any(v is not None for vals in rates.values() for v in vals):
+            return amounts, rates, totals
+        # A zero/negative rate (a commission reversal on a tiny channel, e.g.
+        # STAR POS in Q1 FY27) gets no segment - it can't be a bar height.
+        rates = {ch: [v if v is not None and v > 0 else None for v in vals] for ch, vals in rates.items()}
+        return rates, rates, totals
+
+    cur_heights, cur_labels, cur_totals = rate_bars(cur_series, cur_rates)
+    pri_heights, pri_labels, pri_totals = rate_bars(pri_series, pri_rates)
+
+    bullets = ["Segment: channel commission as % of that channel's own premium (NL-6 / NL-36).",
+               "Total above the bar: company's gross commission (INR Crores)."]
     n_panels = int(has_cur) + int(has_pri)
     fig, panels, ins = new_page("Channel-wise Commission: SAHI's", 13, n_panels, want_insights=True, hspace=0.75,
                                  n_insight_lines=len(bullets))
@@ -989,16 +1005,16 @@ def slide_13(pdf, rows):
         charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}",
                           unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
-                           segment_pcts=cur_rates)
+        charts.stacked_bar(ax, names, cur_heights, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           segment_pcts=cur_labels, display_totals=cur_totals)
         idx += 1
     if has_pri:
         charts.panel_box(fig, panels[idx],
                           title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}",
                           unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
-        charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
-                           segment_pcts=pri_rates)
+        charts.stacked_bar(ax, names, pri_heights, colors, pct100=True, show_yaxis=False, show_totals=True,
+                           segment_pcts=pri_labels, display_totals=pri_totals)
     draw_insights(fig, ins, bullets)
     pdf.savefig(fig)
     plt.close(fig)
@@ -1280,7 +1296,7 @@ def slide_25(pdf, rows):
     panels = [
         {"title": "Manpower cost to total Opex", "metric1": "Manpower cost to total Opex", "metric2": None,
          "kind": "percent"},
-        {"title": "Manpower cost per employee (Rs.)", "metric1": "Manpower cost per employee", "metric2": None,
+        {"title": "Manpower cost per employee (INR Lakhs)", "metric1": "Manpower cost per employee", "metric2": None,
          "kind": "money"},
         {"title": "Facility rental per office per month (Rs. Lakhs)", "metric1": "Facility rental per office per month",
          "metric2": None, "kind": "money"},
@@ -1465,13 +1481,13 @@ def slide_39(pdf, rows):
     the Data Engine's current-period `rows`, same as before - this slide mixes
     both sources rather than being purely one or the other."""
     off_table = historical.get_table("Offices")
-    off_years = off_keys = off_values = off_prov = None
+    off_years = off_keys = off_values = None
     has_off = bool(off_table)
     if has_off:
         off_keys = [k for k in data.COMPANY_ORDER if k in off_table]
         has_off = bool(off_keys)
     if has_off:
-        off_years, off_values, off_prov = _trend_series(rows, "Offices", off_table, off_keys)
+        off_years, off_values = _trend_series(rows, "Offices", off_table, off_keys)
 
     cdata = data.by_company(rows, 39, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
@@ -1498,7 +1514,7 @@ def slide_39(pdf, rows):
     idx = 0
     if has_off:
         charts.trend_lines(fig, panels[idx], off_years, off_keys, off_values, title="No. of Offices",
-                            unit_label="Count", provisional_from=off_prov)
+                            unit_label="Count")
         idx += 1
     if has_int:
         charts.panel_box(fig, panels[idx], title="Intermediaries by type")
@@ -1521,22 +1537,20 @@ def period_trend_label():
 
 
 def _trend_series(rows, title, table, keys):
-    """(years, {key: values}, provisional_index) for one trend chart: the
-    workbook's own years (capped to the reporting period - see
-    historical.sorted_years), plus this period's Data Engine point appended
-    as the last entry - unless the workbook already has that label (a Q4
-    whose year was already added). provisional_index marks where the added
-    point starts, for trend_lines to draw it hollow/dashed; None if nothing
-    was added."""
+    """(years, {key: values}) for one trend chart: the workbook's completed
+    years (capped to the reporting period - see historical.sorted_years),
+    plus this period's Data Engine point appended as the last entry ("Q1
+    FY26" after FY25) - unless the workbook already has that label (a Q4
+    whose year was already added)."""
     years = historical.sorted_years(table)
     values = {k: [table[k].get(y) for y in years] for k in keys}
     label = period_trend_label()
     if label in years:
-        return years, values, None
+        return years, values
     point = historical.period_values(rows, title)
     if not any(point.get(k) is not None for k in keys):
-        return years, values, None
-    return years + [label], {k: v + [point.get(k)] for k, v in values.items()}, len(years)
+        return years, values
+    return years + [label], {k: v + [point.get(k)] for k, v in values.items()}
 
 
 def historical_trend_page(pdf, rows, page_title, page_no, metrics, hspace=0.42):
@@ -1566,8 +1580,8 @@ def historical_trend_page(pdf, rows, page_title, page_no, metrics, hspace=0.42):
         keys = [k for k in data.COMPANY_ORDER if k in table]
         if not keys:
             continue
-        years, values, provisional = _trend_series(rows, m["title"], table, keys)
-        panels_data.append((m, years, keys, values, provisional))
+        years, values = _trend_series(rows, m["title"], table, keys)
+        panels_data.append((m, years, keys, values))
     if not panels_data:
         return
     # bottom=0.13 (vs new_page's normal 0.09): this page has no insights box
@@ -1575,10 +1589,10 @@ def historical_trend_page(pdf, rows, page_title, page_no, metrics, hspace=0.42):
     # sits inside panel_box's pad_bottom reserve just above that margin - see
     # new_page's bottom= docstring.
     fig, panels, _ins = new_page(page_title, page_no, len(panels_data), hspace=hspace, bottom=0.13)
-    for spec, (m, years, keys, values, provisional) in zip(panels, panels_data):
+    for spec, (m, years, keys, values) in zip(panels, panels_data):
         charts.trend_lines(fig, spec, years, keys, values, title=m.get("panel_title", m["title"]),
                             unit_label=m.get("unit_label", "INR Crore"), is_percent=m.get("is_percent", False),
-                            value_fmt=m.get("value_fmt"), provisional_from=provisional)
+                            value_fmt=m.get("value_fmt"))
     pdf.savefig(fig)
     plt.close(fig)
 

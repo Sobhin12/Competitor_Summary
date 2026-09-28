@@ -537,7 +537,7 @@ _RETRYABLE_STATUSES = ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL",
 # test_one_company_failing_does_not_sink_the_run suddenly taking that long.
 _RETRYABLE_TEXT_RE = re.compile(
     r"'status':\s*'(?:" + "|".join(_RETRYABLE_STATUSES) + r")'"
-    r"|^\s*(?:429|500|502|503|504)\s+(?:" + "|".join(_RETRYABLE_STATUSES) + r")",
+    r"|^\s*(?:429|500|502|503|504)\s+(?:" + "|".join(_RETRYABLE_STATUSES) + r")\b",
     re.IGNORECASE)
 
 

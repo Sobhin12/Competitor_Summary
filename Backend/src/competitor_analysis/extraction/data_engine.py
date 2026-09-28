@@ -33,7 +33,7 @@ from competitor_analysis import logging_setup
 from competitor_analysis.extraction.forms import (COMPANY_PDFS, get_form_page, get_line_item, get_line_item_any,
                           get_form_text, get_line_item_from_text, sum_rows_after,
                           get_segment_line_item, get_segment_line_item_any, sum_lines_after_from_text,
-                          extract_nl36 as pdf_extract_nl36, NL36_CHANNELS,
+                          extract_nl36 as pdf_extract_nl36, extract_nl36_policies, NL36_CHANNELS,
                           RESOLUTION_LOG, year_frags as pdf_extract_year_frags,
                           _is_cumulative_header, _SNAPSHOT_PHRASE_RE, parse_num)
 from competitor_analysis.extraction import gemini as gemini_extract
@@ -1166,6 +1166,7 @@ def extract_income_statement(company_short, pdf_path):
     out["Investment Portfolio"] = extract_investment_portfolio(pdf_path)
     out["Average Claim Size"] = extract_average_claim_size(pdf_path)
     out["NL-45 Claims"] = (extract_nl45_claims(pdf_path), None)
+    out["NL-36 Total Policies"] = extract_nl36_policies(pdf_path)
     out["CSR Amount"] = (extract_nl37_amount_csr(pdf_path), None)
     out["NL-45 Complaint Ratios"] = extract_nl45_complaint_ratios(pdf_path)  # (policy, claim), not (cur, prior)
     out["IT Capex"] = (lakhs_to_cr(extract_it_capex(pdf_path)), None)
@@ -1248,8 +1249,9 @@ def _nl31_table_and_blocks(pdf_path):
 
 
 def extract_investment_yield(pdf_path):
-    """NL-31's own TOTAL row already carries a precomputed, annualized
-    'Gross Yield (%)' - verified to match GT exactly (e.g. NBHI: 5.45% cur,
+    """NL-31's own TOTAL row already carries a precomputed 'Gross Yield (%)'
+    - year to date, NOT annualized (a Q1 filing prints ~1.8%; the trend
+    chart annualizes it, see historical.ANNUALIZED_TABLES) - verified to match GT exactly (e.g. NBHI: 5.45% cur,
     5.55% prior), so this is read directly rather than computed from AUM.
     Each YTD block is [Investment, Income, Gross Yield, Net Yield]; take
     the TOTAL row's 3rd sub-column within each block.
@@ -2196,6 +2198,44 @@ def _latest_prior_period_archive():
     return matches[-1] if matches else None
 
 
+_FY_START_ONROLL = {}
+
+
+def _fy_start_onroll(company):
+    """On-roll employees at the start of the reporting financial year - the
+    CURRENT "Employees / On-roll Employee" value in the newest saved
+    Data_Engine_{prior_fy}_Q4_*.xlsx (last year-end's NL-41 count). Matched
+    by Meric 1/Metric 2 text, not slide number, so a workbook from before a
+    slide renumbering still resolves. None if no such workbook or row."""
+    from competitor_analysis.reporting.theme import canonical_company
+    matches = sorted(glob.glob(str(paths.OUTPUT_DIR / f"Data_Engine_{cfg.prior_fy()}_Q4_*.xlsx")))
+    if not matches:
+        return None
+    path = matches[-1]
+    if path not in _FY_START_ONROLL:
+        found = {}
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb["Data Engine"]
+            rows = ws.iter_rows(values_only=True)
+            header = [str(h).strip() if h is not None else "" for h in next(rows)]
+            col = cfg.period_column(cfg.prior_fy(), "Q4")
+            if col in header:
+                ci, mi, m1, m2 = (header.index(col), header.index("Company"),
+                                  header.index("Meric 1"), header.index("Metric 2"))
+                for r in rows:
+                    if (str(r[m1] or "").strip() == "Employees" and str(r[m2] or "").lower().startswith("on-roll")
+                            and isinstance(r[ci], (int, float))):
+                        key = canonical_company(str(r[mi] or ""))
+                        if key:
+                            found.setdefault(key, r[ci])
+        finally:
+            wb.close()
+        _FY_START_ONROLL[path] = found
+        log.info("Opening on-roll headcounts from %s: %d companies", os.path.basename(path), len(found))
+    return _FY_START_ONROLL[path].get(canonical_company(company))
+
+
 def backfill_prior_from_last_year(ws, dry_run=False):
     """Fills PRIOR-period gaps listed in PRIOR_BACKFILL_TARGETS from last
     year's own Data Engine output for the same quarter, whose CUR column is
@@ -2362,6 +2402,16 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # Slide 25: manpower/facility metrics (Rs. Lakhs, not Rs. - verified
     # against GT)
     employees_cur, _ = get("employees_onroll")
+    # Average on-roll headcount over the year to date: the on-roll count at
+    # the start of the financial year (last year's Q4 Data Engine) and at
+    # the end of this period (NL-41) - the reference deck's "Manpower cost /
+    # Average head count (excluding outsourced manpower count)". NL-41's own
+    # movement table can't supply the opening count: it is quarterly and
+    # some filers (Care) include off-roll staff in it. Falls back to the
+    # closing count alone when last year's Q4 workbook isn't on disk.
+    opening_employees = _fy_start_onroll(company)
+    avg_employees_cur = ((opening_employees + employees_cur) / 2 if opening_employees and employees_cur
+                         else employees_cur)
     # Offices = the average of NL-41's opening and closing counts for the
     # period (rent accrues across the whole period, over which the office
     # count changes). Falls back to whichever count exists, then to the
@@ -2370,8 +2420,8 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     counts = [c for c in (opening_offices, closing_offices) if c]
     offices_cur = sum(counts) / len(counts) if counts else get("offices_count")[0]
     D[(25, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
-    if manpower_cur is not None and employees_cur:
-        D[(25, "Manpower cost per employee", None)] = (round_half_up(manpower_cur * 100 / employees_cur, 4), None)
+    if manpower_cur is not None and avg_employees_cur:
+        D[(25, "Manpower cost per employee", None)] = (round_half_up(manpower_cur * 100 / avg_employees_cur, 4), None)
     rent_cur, rent_prior = get("rent_expense")
     if rent_cur is not None and offices_cur:
         # Rent is a cumulative YTD figure, so the monthly run-rate divides by
@@ -2569,8 +2619,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         claims_denom_cur = os_start_cur + reported_cur - (os_end_cur or 0)
     D[(23, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, claims_denom_cur), None)
 
-    # Total policy count = sum of Number of Policies across every NL-36
-    # channel (previously only Individual Agents' count was extracted).
+    # Total policy count = NL-36's own Grand Total (A+B) "No. of Policies",
+    # read directly - every channel, Direct Business/MISP included. Summing
+    # the named Gemini channels (the fallback below) misses those: CARE's
+    # Q1 FY27 sum came to ~8.3 lakh against a printed total of 9.46 lakh.
     total_policies_cur = 0
     any_policy_count = False
     for _, metric2 in gemini_extract.CHANNELS_36:
@@ -2579,6 +2631,9 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
             total_policies_cur += c
             any_policy_count = True
     total_policies_cur = total_policies_cur if any_policy_count else None
+    nl36_total_cur, _ = income.get("nl36_total_policies", (None, None))
+    if nl36_total_cur:
+        total_policies_cur = nl36_total_cur
 
     # Average Claim Size = Total amount of claims paid / Total no. of claims
     # paid, read directly off NL-39 (see extract_average_claim_size) -
@@ -2753,6 +2808,7 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         "ceo_remuneration": inc.get("CEO Remuneration", (None, None)),
         "average_claim_size": inc.get("Average Claim Size", (None, None)),
         "nl45_claims": inc.get("NL-45 Claims", (None, None)),
+        "nl36_total_policies": inc.get("NL-36 Total Policies", (None, None)),
         "it_capex": inc.get("IT Capex", (None, None)),
         "in_house_claims_cost": inc.get("In House Claim Processing Cost", (None, None)),
         "office_counts": inc.get("Office Counts", (None, None)),

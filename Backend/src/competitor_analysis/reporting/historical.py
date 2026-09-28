@@ -60,8 +60,11 @@ def sorted_years(table, cap_to_period=True):
     load_historical_tables()'s return). Returns every year label seen across
     all companies, chronologically ordered.
 
-    `cap_to_period` (default True) drops any year beyond the active
-    reporting period's FY-end year (config.fy_end_year()). The workbook is
+    `cap_to_period` (default True) drops any year the active reporting
+    period hasn't completed: beyond its FY-end year (config.fy_end_year())
+    for a Q4 report, and the FY-end year itself too for Q1-Q3 (a Q1 FY26
+    report ends its full years at FY25 - its own year is still in progress,
+    shown as the "Q1 FY26" point instead, see report._trend_series). The workbook is
     updated by hand once a year, so it can run ahead of a quarterly report
     mid-FY (its latest column would be a not-yet-real future year the report
     period hasn't reached) or behind it (the workbook simply hasn't been
@@ -72,7 +75,7 @@ def sorted_years(table, cap_to_period=True):
     with no special-casing needed."""
     years = {y for comp in table.values() for y in comp}
     if cap_to_period:
-        cap = cfg.fy_end_year() % 100
+        cap = cfg.fy_end_year() % 100 - (0 if cfg.QUARTER == "Q4" else 1)
         years = {y for y in years if _year_sort_key(y) <= cap}
     return sorted(years, key=_year_sort_key)
 
@@ -290,6 +293,12 @@ HISTORICAL_DE_SOURCE = {
 }
 
 
+# Flow metrics whose Q1-Q3 point is annualized on the trend chart: per-agent
+# productivity, and NL-31's gross yield (year-to-date income / investment,
+# not annualized by the filers - Q1 prints ~1.8% against ~7.3% for a year).
+ANNUALIZED_TABLES = {"Average Productivity (per agent)", "Investment Yield"}
+
+
 def period_values(rows, title):
     """{row key: value} for one table, from a Data Engine's rows (current
     period, as-is - a Q1-Q3 figure is year to date). Keys follow
@@ -297,7 +306,10 @@ def period_values(rows, title):
 
     GDPI Growth is derived: each company's GDPI current/prior - 1, plus the
     SAHI and Industry "Growth %" rows. GDPI's own SAHI row is the sum of
-    every SAHI company's GDPI. {} for a table with no Data Engine source."""
+    every SAHI company's GDPI. Tables in ANNUALIZED_TABLES are scaled to a
+    full-year run rate (x 12 / months elapsed - Q1 x4) so the quarter point
+    sits on the same scale as the full years before it, matching the
+    reference deck. {} for a table with no Data Engine source."""
     from competitor_analysis.reporting import data
     out = {}
     if title == "GDPI Growth":
@@ -322,6 +334,9 @@ def period_values(rows, title):
             out.setdefault(key, data.num(r[data.CUR]))
     if title == "GDPI" and out:
         out["SAHI"] = sum(out.values())
+    if title in ANNUALIZED_TABLES:
+        scale = 12 / cfg.months_elapsed()
+        out = {k: v * scale for k, v in out.items()}
     return out
 
 

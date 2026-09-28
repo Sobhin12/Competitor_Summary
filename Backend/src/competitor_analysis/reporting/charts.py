@@ -7,6 +7,8 @@ the underlying data is absent, per the report's "only show what we have"
 rule.
 """
 import math
+import textwrap
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -191,6 +193,11 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
     if not pairs_prior and not pairs_cur:
         return False
     inner = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=subplot_spec, wspace=0.25)
+    # The dashed box's inner edges (same geometry as drawn at the end of this
+    # function) - outside callout labels are kept within it.
+    panel_bbox = subplot_spec.get_position(fig)
+    panel = SimpleNamespace(x0=panel_bbox.x0 - 0.014, x1=panel_bbox.x1 + 0.014,
+                            y0=panel_bbox.y0 - 0.018, y1=panel_bbox.y1)
     for i, (period_label, pairs) in enumerate([(prior_period_label, pairs_prior), (current_period_label, pairs_cur)]):
         ax = fig.add_subplot(inner[i])
         if not pairs:
@@ -212,11 +219,15 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
             v = pct / 100 * total
             return value_fmt(v) if pct >= 3 else ""
 
+        # The ring is drawn at radius R inside fixed axis limits (XL, YL), so
+        # the outside name/% callouts always have room within the axes - and
+        # so within the panel's dashed box - instead of growing past it.
+        R = 1.0
         wedges, _, autotexts = ax.pie(
-            vals, colors=cols, autopct=_autopct, pctdistance=0.73,
-            wedgeprops=dict(width=0.55, edgecolor="white"), startangle=90)
+            vals, colors=cols, autopct=_autopct, pctdistance=0.73, radius=R,
+            wedgeprops=dict(width=0.55 * R, edgecolor="white"), startangle=90)
         for t in autotexts:
-            t.set_fontsize(7)
+            t.set_fontsize(8)
             t.set_fontweight("bold")
             t.set_color("white")
 
@@ -236,12 +247,13 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
         renderer = fig.canvas.get_renderer()
         n = len(wedges)
         spans = [w.theta2 - w.theta1 for w in wedges]
+        ring = 0.73 * R
         for wi, (w, t) in enumerate(zip(wedges, autotexts)):
             if not t.get_text():
                 continue
             text_w = t.get_window_extent(renderer=renderer).width
             own_span = math.radians(spans[wi])
-            chord = 2 * 0.73 * math.sin(own_span / 2)
+            chord = 2 * ring * math.sin(own_span / 2)
             p0, p1 = ax.transData.transform((0, 0)), ax.transData.transform((chord, 0))
             chord_px = abs(p1[0] - p0[0])
             if text_w <= chord_px * 0.92:
@@ -250,27 +262,79 @@ def doughnut_pair(fig, subplot_spec, prior_period_label, current_period_label, l
             toward_next = next_span >= prev_span
             neighbor_span = math.radians(next_span if toward_next else prev_span)
             scale = (chord_px / chord) if chord else 1
-            needed_rad = ((text_w - chord_px) / scale) / 0.73 if scale else 0
+            needed_rad = ((text_w - chord_px) / scale) / ring if scale else 0
             if needed_rad > neighbor_span * 0.45:
                 t.set_text("")
                 continue
             bisector = math.radians((w.theta1 + w.theta2) / 2)
             ang = bisector + (needed_rad if toward_next else -needed_rad)
-            t.set_position((0.73 * math.cos(ang), 0.73 * math.sin(ang)))
+            t.set_position((ring * math.cos(ang), ring * math.sin(ang)))
 
-        # Outside callout labels (name + share). Deliberately NOT ax.pie's
-        # own `labels=` kwarg: that always centers text on its anchor point,
-        # which for a wide wedge on the circle's left half runs the label
-        # straight back into the ring (and into the inside value text) -
-        # anchoring by the text's edge, on whichever side of the circle the
-        # wedge actually falls, keeps it growing outward instead.
+        # Outside callout labels (name + share), anchored by the edge facing
+        # away from the ring so they grow outward. Then, per side: labels of
+        # adjacent small slices are spread apart vertically so they never
+        # overlap (a thin leader line ties each back to its slice), and any
+        # label that would cross the axes edge is pulled back inside.
+        px_per_unit = (ax.transData.transform((1, 1)) - ax.transData.transform((0, 0)))
+        callouts = []
         for w, name, v in zip(wedges, labs, vals):
             ang = math.radians((w.theta1 + w.theta2) / 2)
             x, y = math.cos(ang), math.sin(ang)
             pct = (v / total * 100) if total else 0
-            ax.annotate(f"{name}\n{fmt_fixed(pct, 1)}%", xy=(x, y), xytext=(1.22 * x, 1.15 * y),
-                        ha="left" if x >= 0 else "right", va="center", fontsize=7,
-                        color=theme.GREY_TEXT, annotation_clip=False)
+            wrapped = "\n".join(textwrap.wrap(str(name), 16)) or str(name)
+            t = ax.text(0, 0, f"{wrapped}\n{fmt_fixed(pct, 1)}%", fontsize=7.5, color=theme.GREY_TEXT,
+                        ha="left" if x >= 0 else "right", va="center")
+            ext = t.get_window_extent(renderer=renderer)
+            callouts.append({"text": t, "anchor": (R * x, R * y), "side": 1 if x >= 0 else -1,
+                             "x": 1.22 * R * x, "y": 1.15 * R * y,
+                             "w": ext.width / px_per_unit[0], "h": ext.height / px_per_unit[1]})
+        # Where a label may go, in this axes' data units: inside the panel's
+        # dashed box, and on this doughnut's own half of the gap between the
+        # two doughnuts (so neither pair's labels can run into the other's).
+        cell_l, cell_r = inner[0].get_position(fig), inner[1].get_position(fig)
+        mid = (cell_l.x1 + cell_r.x0) / 2
+        margin = 0.006
+        fx0 = (panel.x0 + margin) if i == 0 else (mid + margin)
+        fx1 = (mid - margin) if i == 0 else (panel.x1 - margin)
+        to_data = lambda fx, fy: ax.transData.inverted().transform(fig.transFigure.transform((fx, fy)))
+        lo_x, lo_y = to_data(fx0, panel.y0 + margin)
+        hi_x, hi_y = to_data(fx1, panel.y1 - margin)
+
+        gap = 0.03
+        for side in (1, -1):
+            group = sorted((c for c in callouts if c["side"] == side), key=lambda c: -c["y"])
+            for prev, cur in zip(group, group[1:]):
+                limit = prev["y"] - (prev["h"] + cur["h"]) / 2 - gap
+                if cur["y"] > limit:
+                    cur["y"] = limit
+            if group:
+                low = group[-1]["y"] - group[-1]["h"] / 2
+                if low < lo_y:
+                    for c in group:
+                        c["y"] += lo_y - low
+                high = group[0]["y"] + group[0]["h"] / 2
+                if high > hi_y:
+                    for c in group:
+                        c["y"] -= high - hi_y
+            for c in group:
+                # Start the label clear of the ring at its own height (the
+                # vertical spreading above can move it level with the ring)...
+                top, bottom = c["y"] + c["h"] / 2, c["y"] - c["h"] / 2
+                nearest = 0.0 if bottom <= 0 <= top else min(abs(top), abs(bottom))
+                if nearest < R:
+                    clear = math.sqrt(R * R - nearest * nearest) + 0.06
+                    c["x"] = side * max(abs(c["x"]), clear)
+                # ...then pull back anything that would still cross its
+                # allowed area - staying inside the box wins over clearance.
+                if side > 0:
+                    c["x"] = min(c["x"], hi_x - c["w"])
+                else:
+                    c["x"] = max(c["x"], lo_x + c["w"])
+        for c in callouts:
+            c["text"].set_position((c["x"], c["y"]))
+            ax.annotate("", xy=c["anchor"], xytext=(c["x"], c["y"]),
+                        arrowprops=dict(arrowstyle="-", color=theme.GRID_COLOR, linewidth=0.6,
+                                        shrinkA=1, shrinkB=1))
 
         lines = ([(group_label, 6.5, theme.DARK_TEXT)] if group_label else []) + [
             (period_label, 6.5, theme.DARK_TEXT),
@@ -316,7 +380,7 @@ def _annotate_pair_growth(ax, x, pri, cur, raw_pairs, only_if=None):
         if only_if is not None and not only_if(top):
             continue
         ax.annotate(_growth_label(g), (xi, top), textcoords="offset points", xytext=(0, 11),
-                    ha="center", va="bottom", fontsize=6.5, fontweight="bold", color=_growth_color(g))
+                    ha="center", va="bottom", fontsize=7.5, fontweight="bold", color=_growth_color(g))
 
 
 def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, prior_label=None,
@@ -335,11 +399,14 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
     cur = [p[2] if p[2] is not None else 0 for p in pairs]
     x = list(range(len(cats)))
     w = 0.36
+    # Bar centres sit `off` either side of the category - a little more than
+    # half a bar apart - so the two value labels have room side by side.
+    off = 0.21
     fmt = (lambda v: f"{fmt_fixed(v * 100, 1)}%") if is_percent else _num_fmt
 
     def _draw(ax):
-        b1 = ax.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
-        b2 = ax.bar([i + w / 2 for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
+        b1 = ax.bar([i - off for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
+        b2 = ax.bar([i + off for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
         ax.set_xticks(x)
         return b1, b2
 
@@ -348,7 +415,7 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
         ax = fig.add_subplot(subplot_spec)
         b1, b2 = _draw(ax)
         for bars, vals in ((b1, pri), (b2, cur)):
-            ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=6.5, padding=1)
+            ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=7.5, padding=1)
         if show_growth:
             _annotate_pair_growth(ax, x, pri, cur, pairs)
         # Extra headroom (vs. the 0.14 default) so the legend - anchored at
@@ -373,17 +440,17 @@ def grouped_bar(fig, subplot_spec, categories, prior_values, current_values, pri
     # axis's ylim, so clipping a bar at the OTHER axis's boundary happens
     # mid-bar, not at a top edge, avoiding the antialiasing sliver a
     # boundary-hugging clip could otherwise leave.
-    b1t = ax_top.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
-    b2t = ax_top.bar([i + w / 2 for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
+    b1t = ax_top.bar([i - off for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
+    b2t = ax_top.bar([i + off for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
     ax_top.set_xticks(x)
-    b1b = ax_bot.bar([i - w / 2 for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
-    b2b = ax_bot.bar([i + w / 2 for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
+    b1b = ax_bot.bar([i - off for i in x], pri, width=w, label=prior_label, color=theme.PRIOR_COLOR)
+    b2b = ax_bot.bar([i + off for i in x], cur, width=w, label=current_label, color=theme.CURRENT_COLOR)
     # Label only the axis a bar's true value actually falls in, so a tall
     # bar isn't labeled twice (once in each panel).
-    ax_top.bar_label(b1t, labels=[fmt(v) if v > bottom_max else "" for v in pri], fontsize=6.5, padding=1)
-    ax_top.bar_label(b2t, labels=[fmt(v) if v > bottom_max else "" for v in cur], fontsize=6.5, padding=1)
-    ax_bot.bar_label(b1b, labels=[fmt(v) if v <= bottom_max else "" for v in pri], fontsize=6.5, padding=1)
-    ax_bot.bar_label(b2b, labels=[fmt(v) if v <= bottom_max else "" for v in cur], fontsize=6.5, padding=1)
+    ax_top.bar_label(b1t, labels=[fmt(v) if v > bottom_max else "" for v in pri], fontsize=7.5, padding=1)
+    ax_top.bar_label(b2t, labels=[fmt(v) if v > bottom_max else "" for v in cur], fontsize=7.5, padding=1)
+    ax_bot.bar_label(b1b, labels=[fmt(v) if v <= bottom_max else "" for v in pri], fontsize=7.5, padding=1)
+    ax_bot.bar_label(b2b, labels=[fmt(v) if v <= bottom_max else "" for v in cur], fontsize=7.5, padding=1)
     if show_growth:
         _annotate_pair_growth(ax_top, x, pri, cur, pairs, only_if=lambda top: top > bottom_max)
         _annotate_pair_growth(ax_bot, x, pri, cur, pairs, only_if=lambda top: top <= bottom_max)
@@ -412,7 +479,7 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
     if brk is None:
         ax = fig.add_subplot(subplot_spec)
         bars = ax.bar(cats, vals, color=color or theme.BLUE)
-        ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=7, padding=1)
+        ax.bar_label(bars, labels=[fmt(v) for v in vals], fontsize=8, padding=1)
         _add_headroom(ax, vals)
         ax.tick_params(axis="x", labelsize=8)
         _style_bar_axes(ax)
@@ -427,8 +494,8 @@ def single_bar(fig, subplot_spec, categories, values, is_percent=False, color=No
     # longer version of this comment for why (same fix, same reason).
     bars_top = ax_top.bar(cats, vals, color=color or theme.BLUE)
     bars_bot = ax_bot.bar(cats, vals, color=color or theme.BLUE)
-    ax_top.bar_label(bars_top, labels=[fmt(v) if v > bottom_max else "" for v in vals], fontsize=7, padding=1)
-    ax_bot.bar_label(bars_bot, labels=[fmt(v) if v <= bottom_max else "" for v in vals], fontsize=7, padding=1)
+    ax_top.bar_label(bars_top, labels=[fmt(v) if v > bottom_max else "" for v in vals], fontsize=8, padding=1)
+    ax_bot.bar_label(bars_bot, labels=[fmt(v) if v <= bottom_max else "" for v in vals], fontsize=8, padding=1)
     lo = min(0, min(vals))
     _finish_broken_axes(ax_top, ax_bot, bottom_max, top_max, lo=lo)
     ax_bot.tick_params(axis="x", labelsize=8)
@@ -518,7 +585,7 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
                     labels.append(_num_fmt(rv))
                 else:
                     labels.append(f"{fmt_fixed(v * 100, 0)}%" if pct100 else _num_fmt(v))
-            ax.bar_label(bars, labels=labels, label_type="center", fontsize=6, color="white")
+            ax.bar_label(bars, labels=labels, label_type="center", fontsize=7, color="white")
         bottoms = [b + v for b, v in zip(bottoms, vals)]
     growths = [None] * len(cats)
     if prior_series:
@@ -532,13 +599,13 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
         headroom = 0.03 if pct100 else max(bottoms) * 0.03
         for x, (top, tot, g) in enumerate(zip(bottoms, totals, growths)):
             if show_totals and tot is not None:
-                ax.text(x, top + headroom, _indian_grouping(tot), ha="center", va="bottom", fontsize=7.5,
+                ax.text(x, top + headroom, _indian_grouping(tot), ha="center", va="bottom", fontsize=8.5,
                         fontweight="bold", color=theme.DARK_TEXT)
             if g is not None:
                 # Stacked just above the total (offset in points, so it
                 # clears the total's own text height at any axis scale).
                 ax.annotate(_growth_label(g), (x, top + headroom), textcoords="offset points",
-                            xytext=(0, 10 if show_totals else 0), ha="center", va="bottom", fontsize=6.5,
+                            xytext=(0, 11 if show_totals else 0), ha="center", va="bottom", fontsize=7.5,
                             fontweight="bold", color=_growth_color(g))
     ax.tick_params(axis="x", labelsize=7, rotation=0)
     # Extra room above the bars for the growth line, on top of what the
@@ -559,19 +626,23 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
     return True
 
 
-def change_bar(ax, changes, unit="pp"):
+def change_bar(ax, changes, unit="%"):
     """Horizontal diverging bar - replaces the reference deck's dot/bubble
     'Market Share Change' mini-chart with a simpler, equally-informative
-    static chart. `changes`: {company_key: signed_change_value}."""
+    static chart. `changes`: {company_key: signed_change_value}.
+
+    Each bar keeps its company's own colour (matching the doughnut above it
+    on the same page) whatever the sign - direction is already carried by
+    the bar's side of the zero line and the +/- label."""
     pairs = [(k, v) for k, v in changes.items() if v is not None]
     if not pairs:
         return False
     labels = [theme.COMPANY_DISPLAY_NAME.get(k, k) for k, _ in pairs]
     vals = [v for _, v in pairs]
-    colors = [theme.COMPANY_COLORS.get(k, theme.ORANGE) if v >= 0 else "#C00000" for (k, _), v in zip(pairs, vals)]
+    colors = [theme.COMPANY_COLORS.get(k, theme.ORANGE) for k, _ in pairs]
     y = range(len(labels))
     bars = ax.barh(list(y), vals, color=colors)
-    ax.bar_label(bars, labels=[f"{'+' if v >= 0 else ''}{fmt_fixed(v, 1)}{unit}" for v in vals], fontsize=7, padding=3)
+    ax.bar_label(bars, labels=[f"{'+' if v >= 0 else ''}{fmt_fixed(v, 1)}{unit}" for v in vals], fontsize=8, padding=3)
     lo, hi = min(0, min(vals)), max(0, max(vals))
     span = (hi - lo) or (abs(hi) or 1)
     ax.set_xlim(lo - span * 0.18 if lo < 0 else lo, hi + span * 0.18 if hi > 0 else hi)
@@ -651,7 +722,7 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
                 label=theme.COMPANY_DISPLAY_NAME.get(k, k))
         for xi, v in pts:
             ax.annotate(fmt(v), (xi, norm(v)), textcoords="offset points", xytext=(0, 6),
-                        ha="center", fontsize=6.5, color=theme.DARK_TEXT)
+                        ha="center", fontsize=7.5, color=theme.DARK_TEXT)
     ax.set_xticks(x)
     ax.set_xticklabels(years, fontsize=8)
     ax.margins(x=0.05)
@@ -696,7 +767,7 @@ def income_table(ax, row_labels, company_keys, values_dict, title, percent_rows=
     table = ax.table(cellText=cell_text, colLabels=col_labels, cellLoc="center", colWidths=col_widths,
                       loc="center")
     table.auto_set_font_size(False)
-    table.set_fontsize(7.5)
+    table.set_fontsize(8.5)
     table.scale(1, 1.5)
     for (r, c), cell in table.get_celld().items():
         if r == 0:

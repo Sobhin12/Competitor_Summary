@@ -469,7 +469,7 @@ def slide_05(pdf, rows):
     charts.doughnut_pair(fig, panels[0], cfg.prior_period_label(), cfg.cur_period_label(), names, pri, cur, colors,
                           group_label="SAHI Market", unit_label="INR Crores", title="Market Share")
     if has_change:
-        panel_title(fig, panels[1], "Market Share Change (pp)")
+        panel_title(fig, panels[1], "Market Share Change (%)")
         ax = fig.add_subplot(panels[1])
         charts.change_bar(ax, changes)
     draw_insights(fig, ins, bullets)
@@ -800,13 +800,13 @@ def slide_12(pdf, rows):
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.cur_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.cur_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, ordered, 0))
         idx += 1
     if has_pri:
-        charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.prior_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"SAHI's ({cfg.prior_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, ordered, 1))
@@ -861,7 +861,7 @@ def slide_13(pdf, rows):
     idx = 0
     if has_cur:
         charts.panel_box(fig, panels[idx], title=f"Channel-wise Gross Commission % to GDPI {cfg.cur_period_label()}",
-                          unit_label="Rs. Crore")
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            segment_pcts=cur_rates)
@@ -869,7 +869,7 @@ def slide_13(pdf, rows):
     if has_pri:
         charts.panel_box(fig, panels[idx],
                           title=f"Channel-wise Gross Commission % to GDPI {cfg.prior_period_label()}",
-                          unit_label="Rs. Crore")
+                          unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            segment_pcts=pri_rates)
@@ -985,13 +985,13 @@ def slide_16(pdf, rows):
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.cur_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.cur_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, keys, 0))
         idx += 1
     if has_pri:
-        charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.prior_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Revenue Mix ({cfg.prior_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, keys, 1))
@@ -1020,13 +1020,13 @@ def slide_17(pdf, rows):
                                  n_insight_lines=len(bullets))
     idx = 0
     if has_cur:
-        charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.cur_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.cur_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, cur_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, keys, 0))
         idx += 1
     if has_pri:
-        charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.prior_period_label()})")
+        charts.panel_box(fig, panels[idx], title=f"Geographical Distribution ({cfg.prior_period_label()})", unit_label="INR Crores")
         ax = fig.add_subplot(panels[idx])
         charts.stacked_bar(ax, names, pri_series, colors, pct100=True, show_yaxis=False, show_totals=True,
                            display_totals=_slide8_gdpi_totals(rows, keys, 1))
@@ -1223,10 +1223,9 @@ def slide_27(pdf, rows):
     series_names = ["Corporate Bonds/Debentures", "Govt Bonds", "Deposits", "Equity/Invits/REIT", "Mutual Funds"]
     # Not normalize=True: these bucket values are already absolute Rs. Crore
     # (extract_investment_portfolio), so stacked_bar's own pct100 does the
-    # %-mix conversion and show_totals can print the real absolute total.
+    # %-mix conversion. No totals above the bars (removed on request).
     two_period_stacked_page(pdf, rows, 27, "Investment Portfolio", 27, series_names,
-                             "Investment mix as % of each company's own book value.",
-                             show_totals=True, unit_label="Rs. Crore")
+                             "Investment mix as % of each company's own book value.")
 
 
 def slide_28(pdf, rows):

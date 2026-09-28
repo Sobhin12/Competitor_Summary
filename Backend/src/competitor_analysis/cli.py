@@ -26,21 +26,30 @@ from competitor_analysis import config as cfg
 from competitor_analysis import logging_setup
 from competitor_analysis.logging_setup import phase
 
-log = logging_setup.get_logger(__name__)
+# Named explicitly, not __name__: run as `python -m competitor_analysis.cli`
+# this module is "__main__", outside the "competitor_analysis" logger tree
+# that logging_setup.configure() attaches its handler to - so every INFO line
+# from here was silently dropped (only WARNING+ reached stderr).
+log = logging_setup.get_logger("competitor_analysis.cli")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fy", required=True, help="e.g. FY26")
     parser.add_argument("--quarter", required=True, help="Q1, Q2, Q3 or Q4")
-    parser.add_argument("--stage", default="all", choices=["download", "build", "all", "report"],
+    parser.add_argument("--stage", default="all",
+                         choices=["download", "build", "all", "report", "append-history"],
                          help="download: Phase 1 only, then report what landed on disk. "
                               "build: Phase 2 + 3 against whatever is already in "
                               "data/downloads/{FY}/{Quarter}/. all: both, back to back. "
-                              "report: Phase 3 only, from an existing Data Engine workbook.")
+                              "report: Phase 3 only, from an existing Data Engine workbook. "
+                              "append-history: add the year from a reviewed Q4 Data Engine to "
+                              "data/historical/Historical_Trends.xlsx - append-only, Q4 only.")
     parser.add_argument("--data-engine",
-                         help="--stage report only: the Data Engine .xlsx to render (default: the "
-                              "latest artifacts/output/Data_Engine_{FY}_{Quarter}_*.xlsx).")
+                         help="--stage report / append-history: the Data Engine .xlsx to use (default: "
+                              "the latest artifacts/output/Data_Engine_{FY}_{Quarter}_*.xlsx).")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="--stage append-history only: list what would be written, change nothing.")
     parser.add_argument("--download", choices=["yes", "no"],
                          help="Deprecated alias for --stage: 'yes' => all, 'no' => build.")
     parser.add_argument("--companies",
@@ -148,25 +157,63 @@ def run_build(fy: str, quarter: str) -> dict:
     return summary
 
 
-def run_report(fy: str, quarter: str, data_engine_path: str | None = None) -> str:
-    """Phase 3 only: renders the PDF from an already-filled Data Engine
-    workbook - no downloads, no PDF parsing, no Gemini calls. Defaults to the
-    newest saved workbook for the period. Returns the PDF path."""
+def _resolve_data_engine(fy: str, quarter: str, data_engine_path: str | None) -> str:
+    """The given Data Engine path, or the newest saved one for the period."""
     import glob
 
     from competitor_analysis import paths
 
-    cfg.set_period(fy, quarter)
-    fy, quarter = cfg.FY, cfg.QUARTER
     if data_engine_path is None:
         # Timestamped names (YYYYMMDD_HHMMSS) sort chronologically.
         matches = sorted(glob.glob(str(paths.OUTPUT_DIR / f"Data_Engine_{fy}_{quarter}_*.xlsx")))
         if not matches:
             raise RuntimeError(f"No Data Engine workbook for {fy} {quarter} under {paths.OUTPUT_DIR} - "
                                f"pass --data-engine PATH, or run --stage build first.")
-        data_engine_path = matches[-1]
-    elif not os.path.isfile(data_engine_path):
+        return matches[-1]
+    if not os.path.isfile(data_engine_path):
         raise RuntimeError(f"Data Engine workbook not found: {data_engine_path}")
+    return data_engine_path
+
+
+def run_append_history(fy: str, quarter: str, data_engine_path: str | None = None,
+                       dry_run: bool = False) -> dict:
+    """Adds the year a reviewed Q4 Data Engine completes to
+    data/historical/Historical_Trends.xlsx - append-only (see
+    historical.append_year_from_data_engine), then uploads the workbook to
+    R2 (a no-op without R2 credentials)."""
+    cfg.set_period(fy, quarter)
+    fy, quarter = cfg.FY, cfg.QUARTER
+    if quarter != "Q4":
+        raise ValueError(f"append-history needs a Q4 Data Engine (a completed year) - got {fy} {quarter}.")
+    data_engine_path = _resolve_data_engine(fy, quarter, data_engine_path)
+
+    from dotenv import load_dotenv
+    load_dotenv()  # before storage.r2 reads its credentials at import
+    from competitor_analysis import paths
+    from competitor_analysis.reporting import historical
+    from competitor_analysis.storage import r2
+
+    with phase("Historical append"):
+        log.info("%s from %s%s", "Dry run" if dry_run else "Appending", data_engine_path,
+                 "" if dry_run else f" into {paths.HISTORICAL_TRENDS_WORKBOOK}")
+        result = historical.append_year_from_data_engine(data_engine_path, dry_run=dry_run, log=log.info)
+        for title, reason in result["skipped"].items():
+            log.warning("%s: skipped - %s", title, reason)
+        log.info("%s: %d table(s), %d cell(s) %s", result["year"], len(result["added"]), result["cells"],
+                 "would be written (dry run)" if dry_run else "written")
+        if result["backup"]:
+            log.info("Backup of the previous workbook: %s", result["backup"])
+            r2.upload_file(paths.HISTORICAL_TRENDS_WORKBOOK)
+    return result
+
+
+def run_report(fy: str, quarter: str, data_engine_path: str | None = None) -> str:
+    """Phase 3 only: renders the PDF from an already-filled Data Engine
+    workbook - no downloads, no PDF parsing, no Gemini calls. Defaults to the
+    newest saved workbook for the period. Returns the PDF path."""
+    cfg.set_period(fy, quarter)
+    fy, quarter = cfg.FY, cfg.QUARTER
+    data_engine_path = _resolve_data_engine(fy, quarter, data_engine_path)
 
     from competitor_analysis.reporting import report as pdf_report
 
@@ -198,6 +245,8 @@ def main():
             run_build(args.fy, args.quarter)
         elif stage == "report":
             run_report(args.fy, args.quarter, data_engine_path=args.data_engine)
+        elif stage == "append-history":
+            run_append_history(args.fy, args.quarter, data_engine_path=args.data_engine, dry_run=args.dry_run)
         else:
             run(args.fy, args.quarter, download=True, companies=companies)
     except (ValueError, RuntimeError) as e:

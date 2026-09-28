@@ -588,10 +588,9 @@ def slide_08(pdf, rows):
 
     growth_table = historical.get_table("GDPI Growth")
     growth_keys = [k for k in ("SAHI", "Industry") if growth_table and k in growth_table]
-    growth_years = growth_values = None
+    growth_years = growth_values = growth_prov = None
     if growth_keys:
-        growth_years = historical.sorted_years(growth_table)
-        growth_values = {k: [growth_table[k].get(y) for y in growth_years] for k in growth_keys}
+        growth_years, growth_values, growth_prov = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
 
     if not keys and not growth_keys:
         return
@@ -606,7 +605,7 @@ def slide_08(pdf, rows):
     if growth_keys:
         charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
                             title="SAHI vs Health Industry (Growth)", is_percent=True, unit_label=None,
-                            colors=theme.SEGMENT_COLORS)
+                            colors=theme.SEGMENT_COLORS, provisional_from=growth_prov)
     draw_insights(fig, ins, bullets[:4])
     pdf.savefig(fig)
     plt.close(fig)
@@ -623,10 +622,9 @@ def slide_09(pdf, rows):
     company, not a year-by-year series."""
     growth_table = historical.get_table("GDPI Growth")
     growth_keys = [k for k in data.COMPANY_ORDER if growth_table and k in growth_table]
-    growth_years = growth_values = None
+    growth_years = growth_values = growth_prov = None
     if growth_keys:
-        growth_years = historical.sorted_years(growth_table)
-        growth_values = {k: [growth_table[k].get(y) for y in growth_years] for k in growth_keys}
+        growth_years, growth_values, growth_prov = _trend_series(rows, "GDPI Growth", growth_table, growth_keys)
 
     gdpi_table = historical.get_table("GDPI")
     gdpi_years = historical.sorted_years(gdpi_table) if gdpi_table else []
@@ -642,7 +640,8 @@ def slide_09(pdf, rows):
     idx = 0
     if growth_keys:
         charts.trend_lines(fig, panels[idx], growth_years, growth_keys, growth_values,
-                            title="GDPI Growth % (YoY)", is_percent=True, unit_label=None)
+                            title="GDPI Growth % (YoY)", is_percent=True, unit_label=None,
+                            provisional_from=growth_prov)
         idx += 1
     if cagr_keys:
         charts.panel_box(fig, panels[idx], title=f"GDPI CAGR ({gdpi_years[0]}-{gdpi_years[-1]})")
@@ -932,7 +931,7 @@ def slide_14(pdf, rows):
     """Multi-year trend, sourced from reporting.historical - replaces this
     slide's earlier 2-period cur/prior bars. `rows` unused, kept only so
     SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
-    historical_trend_page(pdf, "Retail Revenue", 14, [
+    historical_trend_page(pdf, rows, "Retail Revenue", 14, [
         {"title": "Retail Health"},
         {"title": "Retail Health Accretion"},
     ])
@@ -946,7 +945,7 @@ def slide_15(pdf, rows):
     KNOWN_ISSUES.md - so a single-period bar was always a weak picture
     here). `rows` (the Data Engine's 2-period rows) goes unused, kept only
     so SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
-    historical_trend_page(pdf, "ATS", 15, [
+    historical_trend_page(pdf, rows, "ATS", 15, [
         {"title": "ATS", "unit_label": "Rs. per policy"},
         {"title": "Average Productivity (per agent)", "panel_title": "Average Productivity",
          "unit_label": "Rs. Lakhs per agent", "value_fmt": lambda v: fmt_fixed(v, 2, grouping=True)},
@@ -1267,42 +1266,42 @@ def slide_30(pdf, rows):
 # ---------------------------------------------------------------------------
 
 def slide_31(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 31, [
+    historical_trend_page(pdf, rows, "Historical Trends (Key Ratios)", 31, [
         {"title": "GWP"},
         {"title": "PBT"},
     ])
 
 
 def slide_32(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 32, [
+    historical_trend_page(pdf, rows, "Historical Trends (Key Ratios)", 32, [
         {"title": "Combined Ratio", "is_percent": True, "unit_label": None},
         {"title": "Loss Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
 def slide_33(pdf, rows):
-    historical_trend_page(pdf, "Historical Trends (Key Ratios)", 33, [
+    historical_trend_page(pdf, rows, "Historical Trends (Key Ratios)", 33, [
         {"title": "Expense Ratio", "is_percent": True, "unit_label": None},
         {"title": "Expense of Management Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
 def slide_34(pdf, rows):
-    historical_trend_page(pdf, "RI Ceded", 34, [
+    historical_trend_page(pdf, rows, "RI Ceded", 34, [
         {"title": "RI Ceding Ratio", "is_percent": True, "unit_label": None},
         {"title": "RI Commission to Ceding Ratio", "is_percent": True, "unit_label": None},
     ])
 
 
 def slide_35(pdf, rows):
-    historical_trend_page(pdf, "ROE & Solvency", 35, [
+    historical_trend_page(pdf, rows, "ROE & Solvency", 35, [
         {"title": "ROE", "is_percent": True, "unit_label": None},
         {"title": "Solvency Ratio", "unit_label": None, "value_fmt": lambda v: f"{fmt_fixed(v, 2)}x"},
     ])
 
 
 def slide_36(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 36, [
+    historical_trend_page(pdf, rows, "Asset Under Management", 36, [
         {"title": "AUM"},
         {"title": "Investment Yield", "is_percent": True, "unit_label": None,
          "value_fmt": lambda v: f"{fmt_fixed(v * 100, 1)}%"},
@@ -1310,7 +1309,7 @@ def slide_36(pdf, rows):
 
 
 def slide_37(pdf, rows):
-    historical_trend_page(pdf, "Asset Under Management", 37, [
+    historical_trend_page(pdf, rows, "Asset Under Management", 37, [
         {"title": "AUM Shareholders"},
         {"title": "AUM Policyholders"},
     ])
@@ -1324,7 +1323,7 @@ def slide_38(pdf, rows):
     """Multi-year trend, sourced from reporting.historical - replaces this
     slide's earlier current-period-only bars. `rows` unused, kept only so
     SECTION_FUNCS can call every slide_NN(pdf, rows) uniformly."""
-    historical_trend_page(pdf, "Distribution Footprint", 38, [
+    historical_trend_page(pdf, rows, "Distribution Footprint", 38, [
         {"title": "Employees", "panel_title": "Employees (On-roll)", "unit_label": "Count"},
         {"title": "Agents", "panel_title": "Individual Agents", "unit_label": "Count"},
     ])
@@ -1339,14 +1338,13 @@ def slide_39(pdf, rows):
     the Data Engine's current-period `rows`, same as before - this slide mixes
     both sources rather than being purely one or the other."""
     off_table = historical.get_table("Offices")
-    off_years = off_keys = off_values = None
+    off_years = off_keys = off_values = off_prov = None
     has_off = bool(off_table)
     if has_off:
         off_keys = [k for k in data.COMPANY_ORDER if k in off_table]
         has_off = bool(off_keys)
     if has_off:
-        off_years = historical.sorted_years(off_table)
-        off_values = {k: [off_table[k].get(y) for y in off_years] for k in off_keys}
+        off_years, off_values, off_prov = _trend_series(rows, "Offices", off_table, off_keys)
 
     cdata = data.by_company(rows, 39, theme.canonical_company)
     keys = [k for k in data.COMPANY_ORDER if k in cdata]
@@ -1373,7 +1371,7 @@ def slide_39(pdf, rows):
     idx = 0
     if has_off:
         charts.trend_lines(fig, panels[idx], off_years, off_keys, off_values, title="No. of Offices",
-                            unit_label="Count")
+                            unit_label="Count", provisional_from=off_prov)
         idx += 1
     if has_int:
         charts.panel_box(fig, panels[idx], title="Intermediaries by type")
@@ -1387,7 +1385,34 @@ def slide_39(pdf, rows):
 # Historical trend slides (multi-year, from data/historical/Historical_Trends.xlsx)
 # ---------------------------------------------------------------------------
 
-def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
+def period_trend_label():
+    """The x-axis label for the reporting period's own point: "Q1 FY27" for
+    Q1-Q3, or the plain year "FY26" for Q4 (a Q4 Data Engine is the full
+    year)."""
+    yy = f"FY{cfg.fy_end_year() % 100:02d}"
+    return yy if cfg.QUARTER == "Q4" else f"{cfg.QUARTER} {yy}"
+
+
+def _trend_series(rows, title, table, keys):
+    """(years, {key: values}, provisional_index) for one trend chart: the
+    workbook's own years (capped to the reporting period - see
+    historical.sorted_years), plus this period's Data Engine point appended
+    as the last entry - unless the workbook already has that label (a Q4
+    whose year was already added). provisional_index marks where the added
+    point starts, for trend_lines to draw it hollow/dashed; None if nothing
+    was added."""
+    years = historical.sorted_years(table)
+    values = {k: [table[k].get(y) for y in years] for k in keys}
+    label = period_trend_label()
+    if label in years:
+        return years, values, None
+    point = historical.period_values(rows, title)
+    if not any(point.get(k) is not None for k in keys):
+        return years, values, None
+    return years + [label], {k: v + [point.get(k)] for k, v in values.items()}, len(years)
+
+
+def historical_trend_page(pdf, rows, page_title, page_no, metrics, hspace=0.42):
     """Shared by every slide whose panels come from reporting.historical
     instead of the Data Engine's 2-period rows (slide 15, slide 36, ...) -
     fetches each of `metrics`' workbook tables, lays out one trend_lines
@@ -1414,9 +1439,8 @@ def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
         keys = [k for k in data.COMPANY_ORDER if k in table]
         if not keys:
             continue
-        years = historical.sorted_years(table)
-        values = {k: [table[k].get(y) for y in years] for k in keys}
-        panels_data.append((m, years, keys, values))
+        years, values, provisional = _trend_series(rows, m["title"], table, keys)
+        panels_data.append((m, years, keys, values, provisional))
     if not panels_data:
         return
     # bottom=0.13 (vs new_page's normal 0.09): this page has no insights box
@@ -1424,10 +1448,10 @@ def historical_trend_page(pdf, page_title, page_no, metrics, hspace=0.42):
     # sits inside panel_box's pad_bottom reserve just above that margin - see
     # new_page's bottom= docstring.
     fig, panels, _ins = new_page(page_title, page_no, len(panels_data), hspace=hspace, bottom=0.13)
-    for spec, (m, years, keys, values) in zip(panels, panels_data):
+    for spec, (m, years, keys, values, provisional) in zip(panels, panels_data):
         charts.trend_lines(fig, spec, years, keys, values, title=m.get("panel_title", m["title"]),
                             unit_label=m.get("unit_label", "INR Crore"), is_percent=m.get("is_percent", False),
-                            value_fmt=m.get("value_fmt"))
+                            value_fmt=m.get("value_fmt"), provisional_from=provisional)
     pdf.savefig(fig)
     plt.close(fig)
 

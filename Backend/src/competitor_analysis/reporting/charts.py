@@ -655,7 +655,8 @@ def change_bar(ax, changes, unit="%"):
 
 
 def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=None, unit_label="INR Crore",
-                 is_percent=False, value_fmt=None, gap=0.14, pad=0.12, stretch=0.4, colors=None):
+                 is_percent=False, value_fmt=None, gap=0.14, pad=0.12, stretch=0.4, colors=None,
+                 provisional_from=None):
     """One horizontal LANE per company (stacked top-to-bottom in
     `company_keys` order), rather than every company sharing one y-axis. A
     shared axis flattens whichever companies are far smaller than the
@@ -689,6 +690,9 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
     `colors`, if given, overrides theme.COMPANY_COLORS per key - for a
     non-company series (e.g. SAHI/Industry aggregates), which would
     otherwise all fall back to the same ORANGE default and be indistinguishable.
+    `provisional_from`, if given, is the index in `years` from which points
+    are the in-progress period (e.g. "Q1 FY27" after full years): drawn
+    hollow, joined by a dashed line, so they read as not yet a full year.
     Returns False (draws nothing) if every company's series is empty."""
     fmt = value_fmt or ((lambda v: f"{fmt_fixed(v * 100, 0)}%") if is_percent else _indian_grouping)
     pairs = [(k, company_values.get(k)) for k in company_keys
@@ -716,10 +720,19 @@ def trend_lines(fig, subplot_spec, years, company_keys, company_values, title=No
             frac = 0.5 + (frac - 0.5) * stretch
             return y0 + pad + frac * (lane_h - 2 * pad)
 
-        xs = [xi for xi, _ in pts]
-        ys = [norm(v) for _, v in pts]
-        ax.plot(xs, ys, marker="o", markersize=3.5, linewidth=1.6, color=color,
-                label=theme.COMPANY_DISPLAY_NAME.get(k, k))
+        label = theme.COMPANY_DISPLAY_NAME.get(k, k)
+        solid = [(xi, v) for xi, v in pts if provisional_from is None or xi < provisional_from]
+        extra = [(xi, v) for xi, v in pts if provisional_from is not None and xi >= provisional_from]
+        if solid:
+            ax.plot([xi for xi, _ in solid], [norm(v) for _, v in solid], marker="o", markersize=3.5,
+                    linewidth=1.6, color=color, label=label)
+        if extra:
+            # The in-progress quarter: dashed connector, hollow marker.
+            link = solid[-1:] + extra
+            ax.plot([xi for xi, _ in link], [norm(v) for _, v in link], linestyle="--", linewidth=1.2,
+                    color=color, marker=None, label=None if solid else label)
+            ax.plot([xi for xi, _ in extra], [norm(v) for _, v in extra], linestyle="none", marker="o",
+                    markersize=4.5, markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.3)
         for xi, v in pts:
             ax.annotate(fmt(v), (xi, norm(v)), textcoords="offset points", xytext=(0, 6),
                         ha="center", fontsize=7.5, color=theme.DARK_TEXT)

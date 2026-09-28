@@ -56,8 +56,11 @@ DERIVED_METRIC_SPECS = [
      "inputs": ["manpower_cost (NL-7, llm)", "gwp (deterministic income statement)"]},
     {"key": "it_spend_to_gwp_ratio", "slide": 24, "metric1": "IT spend to GWP ratio", "metric2": None,
      "kind": "percent", "source": "derived", "companies": "all",
-     "formula": "compute_derived_metrics: it_spend / gwp",
-     "inputs": ["it_spend (NL-7, llm)", "gwp (deterministic income statement)"]},
+     "formula": "compute_derived_metrics: it_capex / gwp",
+     "inputs": ["it_capex (NL-14 Additions to IT hardware + IT intangibles, deterministic - extract_it_capex)",
+                "gwp (deterministic income statement)"],
+     "notes": "Current period only; the prior is backfilled from last year's Data Engine. "
+              "NL-7's IT expense (it_spend, llm) is still extracted but no longer feeds this row."},
 
     # --- Slide 25: manpower/facility metrics (Rs. Lakhs) ---
     {"key": "manpower_to_opex", "slide": 25, "metric1": "Manpower cost to total Opex", "metric2": None,
@@ -71,8 +74,9 @@ DERIVED_METRIC_SPECS = [
      "notes": "Current-period only - NL-41 has no prior-year comparative."},
     {"key": "facility_rent_per_office_month", "slide": 25, "metric1": "Facility rental per office per month", "metric2": None,
      "kind": "money", "source": "derived", "companies": "all",
-     "formula": "compute_derived_metrics: rent_cur * 100 / cfg.months_elapsed() / offices_cur",
-     "inputs": ["rent_expense (NL-7, llm, cumulative YTD)", "offices_count (NL-41, llm, current period only)"],
+     "formula": "compute_derived_metrics: rent_cur * 100 / cfg.months_elapsed() / avg(opening offices, closing offices)",
+     "inputs": ["rent_expense (NL-7, llm, cumulative YTD)",
+                "office counts (NL-41 rows 1 and 6, deterministic - extract_office_counts; offices_count (llm) only as fallback)"],
      "notes": "The divisor is cfg.months_elapsed() (3/6/9/12 for Q1-Q4), turning the "
               "cumulative YTD rent into a monthly run-rate for any quarter. "
               "Current-period only (NL-41 has no prior column)."},
@@ -87,11 +91,27 @@ DERIVED_METRIC_SPECS = [
               "time this was calibrated; not a documented spec)."},
 
     # --- Slide 30: Historical Trends duplicates of Slide 18 ---
-    {"key": "hist_gwp", "slide": 30, "metric1": "GWP", "metric2": None,
+    # --- Slide 30: claims & grievances (current period; prior backfilled from last year's Data Engine) ---
+    {"key": "csr_amount_30", "slide": 30, "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
+     "kind": "percent", "source": "derived", "companies": "all",
+     "formula": "extract_nl37_amount_csr: settled / (O/S at beginning + reported - O/S at end), NL-37 amount block, Total column",
+     "inputs": ["NL-37 amount block (Rs. lakh, year to date, deterministic)"],
+     "notes": "Same formula as Slide 23's count-based ratio. ManipalCigna's NL-37 notes that its reported/outstanding "
+              "amounts are claimed amounts, not payouts."},
+    {"key": "claim_complaints_30", "slide": 30, "metric1": "Claim Complaints per 10,000 claims", "metric2": None,
+     "kind": "number", "source": "derived", "companies": "all",
+     "formula": "extract_nl45_complaint_ratios: NL-45 item 7, as printed",
+     "inputs": ["NL-45 Grievance Disposal (deterministic)"]},
+    {"key": "policy_complaints_30", "slide": 30, "metric1": "Policy Complaints per 10,000 policies", "metric2": None,
+     "kind": "number", "source": "derived", "companies": "all",
+     "formula": "extract_nl45_complaint_ratios: NL-45 item 6, as printed",
+     "inputs": ["NL-45 Grievance Disposal (deterministic)"]},
+
+    {"key": "hist_gwp", "slide": 31, "metric1": "GWP", "metric2": None,
      "kind": "money", "source": "derived", "companies": "all",
      "formula": "compute_derived_metrics: passthrough of income['gwp']",
      "inputs": ["gwp (NL-4, deterministic income statement, same figure as Slide 18)"]},
-    {"key": "hist_pbt_27", "slide": 30, "metric1": "PBT", "metric2": None,
+    {"key": "hist_pbt_27", "slide": 31, "metric1": "PBT", "metric2": None,
      "kind": "money", "source": "derived", "companies": "all",
      "formula": "compute_derived_metrics: passthrough of income['pbt']",
      "inputs": ["pbt (NL-2, deterministic income statement)"],
@@ -108,7 +128,7 @@ DERIVED_METRIC_SPECS = [
      "notes": "Slide 26 has its own PBT row alongside Capital/Net Worth - identical figure to Slide 30's."},
 
     # --- Slide 35: Investment Yield (read directly, not computed) ---
-    {"key": "investment_yield_32", "slide": 35, "metric1": "Investment Yield", "metric2": None,
+    {"key": "investment_yield_32", "slide": 36, "metric1": "Investment Yield", "metric2": None,
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "data_engine.extract_investment_yield: NL-31's own TOTAL row Gross Yield sub-column, read directly",
      "inputs": ["NL-31 TOTAL row (deterministic, forms.py)"],
@@ -116,18 +136,18 @@ DERIVED_METRIC_SPECS = [
               "annualized yield %, read as-is (GT-verified exactly, e.g. NBHI 5.45%/5.55%)."},
 
     # --- Slide 33: reinsurance ratios (current period only) ---
-    {"key": "ri_ceding_to_gwp", "slide": 33, "metric1": "RI Ceding to GWP Ratio", "metric2": "Risk Ceded",
+    {"key": "ri_ceding_to_gwp", "slide": 34, "metric1": "RI Ceding to GWP Ratio", "metric2": "Risk Ceded",
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "compute_derived_metrics: ri_ceded_total / gwp",
      "inputs": ["ri_ceded_total (NL-33, llm)", "gwp (deterministic income statement)"],
      "notes": "Current period only - NL-33 has no prior-year column."},
-    {"key": "ri_commission_to_ceding", "slide": 33, "metric1": "RI Commission to RI Ceding", "metric2": "Risk Ceded",
+    {"key": "ri_commission_to_ceding", "slide": 34, "metric1": "RI Commission to RI Ceding", "metric2": "Risk Ceded",
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "compute_derived_metrics: ri_commission / ri_ceded_total",
      "inputs": ["ri_commission (NL-6, llm)", "ri_ceded_total (NL-33, llm)"]},
 
     # --- Slide 34: ROE (current period only) ---
-    {"key": "roe_sahi", "slide": 34, "metric1": "ROE (SAHI)", "metric2": "PAT/Avg. Net Worth",
+    {"key": "roe_sahi", "slide": 35, "metric1": "ROE (SAHI)", "metric2": "PAT/Avg. Net Worth",
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "compute_derived_metrics: pat_cur / ((net_worth_cur + net_worth_prior) / 2)",
      "inputs": ["pat (NL-2, deterministic income statement)", "net_worth (derived, this same registry)"],
@@ -201,11 +221,21 @@ DERIVED_METRIC_SPECS = [
               "a reasonable draft figure rather than left blank - flag for review before external use."},
     {"key": "claims_to_policies_20", "slide": 23, "metric1": "No. of claims to No. of policies", "metric2": None,
      "kind": "ratio", "source": "derived", "companies": "all",
-     "formula": "compute_derived_metrics: claims_reported / sum(channel_policies_<channel> for every NL-36 channel)",
-     "inputs": ["claims_reported (NL-37, llm, count)", "channel_policies_<channel> (NL-36, llm, count, one per gemini_extract.CHANNELS_36 entry)"],
-     "notes": "Total policy count previously only covered the Individual Agents channel "
-              "(used for Slide 15's ATS) - extended to sum policy counts across all 9 NL-36 "
-              "channels so this row has a real (if approximate) denominator."},
+     "formula": "compute_derived_metrics: nl45_claims / sum(channel_policies_<channel> for every NL-36 channel)",
+     "inputs": ["nl45_claims (NL-45 item 5, total claims during the current year, deterministic - extract_nl45_claims)",
+                "channel_policies_<channel> (NL-36, llm, count, up to the quarter, one per gemini_extract.CHANNELS_36 entry)"],
+     "notes": "Both inputs are also written to their own Slide 23 rows, 'Total no. of claims (NL-45)' and "
+              "'Total no. of policies (NL-36)', current period only (prior backfilled like the ratio)."},
+    {"key": "claims_count_nl45_23", "slide": 23, "metric1": "Total no. of claims (NL-45)", "metric2": None,
+     "kind": "count", "source": "derived", "companies": "all",
+     "formula": "extract_nl45_claims: NL-45 item 5, total no. of claims during the current year",
+     "inputs": ["NL-45 Grievance Disposal page (deterministic)"]},
+    {"key": "policies_count_nl36_23", "slide": 23, "metric1": "Total no. of policies (NL-36)", "metric2": None,
+     "kind": "count", "source": "derived", "companies": "all",
+     "formula": "compute_derived_metrics: sum(channel_policies_<channel> for every NL-36 channel)",
+     "inputs": ["channel_policies_<channel> (NL-36, llm, count, up to the quarter)"],
+     "notes": "Sums policy counts across all 9 NL-36 channels (only Individual Agents' was "
+              "extracted originally, for Slide 15's ATS). The ratio's denominator."},
 ]
 
 

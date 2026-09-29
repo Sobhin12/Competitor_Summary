@@ -549,8 +549,12 @@ def stacked_bar(ax, categories, series_dict, colors, pct100=True, value_labels=T
     # A category where every series is None/0 (e.g. no SAHI company writes
     # any Govt.-scheme business) has nothing to show - drop it rather than
     # rendering an empty bar with a fabricated total.
+    # Likewise a category whose shown total (`display_totals`) is exactly 0:
+    # its mix fractions describe nothing - e.g. Narayana's FY25 geography,
+    # stored as 100% Karnataka against a GDPI of 0 - so it isn't drawn.
     present = [i for i in range(n)
-               if any((v[i] is not None and v[i] != 0) for v in series_dict.values())]
+               if any((v[i] is not None and v[i] != 0) for v in series_dict.values())
+               and not (display_totals is not None and display_totals[i] == 0)]
     if not present:
         return False
     cats = [categories[i] for i in present]

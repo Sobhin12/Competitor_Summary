@@ -80,6 +80,10 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     # it here made the server's FY26-27 Q1 run draw every company's FY25-26
     # Q1 channel mix, left over from the FY25-26 Q1 run before it.
     p._NL36_CACHE.clear()
+    # Prefetched Gemini answers are popped as each company is written, but a
+    # run cancelled or failed between prefetch and write leaves the rest
+    # behind - which the next run (any period) would pop and write as its own.
+    p.apply_company_gemini_pipeline._raw_cache.clear()
     # Same class of staleness, lower stakes (nothing reads it back into the
     # workbook, but a long-lived process would otherwise print every earlier
     # run's column-resolution fallbacks mixed into this run's own).

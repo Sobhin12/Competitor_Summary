@@ -2212,7 +2212,10 @@ def _fy_start_onroll(company):
     if not matches:
         return None
     path = matches[-1]
-    if path not in _FY_START_ONROLL:
+    # Keyed by modification time too: a workbook edited in place during the
+    # review pause must not keep serving its pre-edit value to the server.
+    key = (path, os.path.getmtime(path))
+    if key not in _FY_START_ONROLL:
         found = {}
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:
@@ -2231,9 +2234,9 @@ def _fy_start_onroll(company):
                             found.setdefault(key, r[ci])
         finally:
             wb.close()
-        _FY_START_ONROLL[path] = found
+        _FY_START_ONROLL[key] = found
         log.info("Opening on-roll headcounts from %s: %d companies", os.path.basename(path), len(found))
-    return _FY_START_ONROLL[path].get(canonical_company(company))
+    return _FY_START_ONROLL[key].get(canonical_company(company))
 
 
 def backfill_prior_from_last_year(ws, dry_run=False):

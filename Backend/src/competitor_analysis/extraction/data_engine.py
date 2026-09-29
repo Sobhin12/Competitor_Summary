@@ -764,6 +764,7 @@ SLIDE8_COMPANY = {
     "Narayana Health": "Narayana Health", "Galaxy Health": "Galaxy Health",
 }
 SLIDE8_METRIC2 = {"NBHI": "Health + PA + Travel"}
+SLIDE8_NL4_METRIC1 = "GDPI (NL-4)"
 
 
 def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
@@ -797,6 +798,20 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
 
     for company in SLIDE8_COMPANY:
         gt_cur, gt_prior = gdpi_lookup.get(company, (None, None))
+        # GIC is authoritative for GDPI, but it can print 0 for a year the
+        # filer did write business (Narayana's FY25 "Previous Year" row in
+        # the FY25-26 Q4 GIC.xlsx, against 237.18 lakh in its own NL-4) -
+        # a 0/None GIC figure falls back to the company's NL-4 GDPI, which is
+        # also written to its own "GDPI (NL-4)" row for audit.
+        nl4_cur, nl4_prior = apply_income_statement_rows._cache.get(company, {}).get("NL-4 GDPI", (None, None))
+        written += apply_metric_to_rows(ws, idx, 8, SLIDE8_COMPANY[company], SLIDE8_NL4_METRIC1, None,
+                                        nl4_cur, nl4_prior, dry_run, log)
+        if not gt_cur and nl4_cur:
+            log.append((8, company, "Revenue Growth (GDPI)", "current", f"GIC {gt_cur} -> NL-4 {nl4_cur}"))
+            gt_cur = nl4_cur
+        if not gt_prior and nl4_prior:
+            log.append((8, company, "Revenue Growth (GDPI)", "prior", f"GIC {gt_prior} -> NL-4 {nl4_prior}"))
+            gt_prior = nl4_prior
         if gt_cur is not None or gt_prior is not None:
             written += apply_metric_to_rows(
                 ws, idx, 8, SLIDE8_COMPANY[company], "Revenue Growth (GDPI)",
@@ -976,6 +991,9 @@ def extract_income_statement(company_short, pdf_path):
 
     gwp = (_add(gdp_final[0], ri_accepted[0]), _add(gdp_final[1], ri_accepted[1]))
     out["Gross Written Premium"] = tuple(lakhs_to_cr(v) for v in gwp)
+    # The filing's own GDPI, both periods - Slide 8's "GDPI (NL-4)" row and
+    # the fallback for its GIC-sourced GDPI (fix_slide8_and_slide12).
+    out["NL-4 GDPI"] = tuple(lakhs_to_cr(v) for v in gdp)
     out["Net Written Premium"] = tuple(lakhs_to_cr(v) for v in nwp)
     out["Earned Premium"] = tuple(lakhs_to_cr(v) for v in ep)
 

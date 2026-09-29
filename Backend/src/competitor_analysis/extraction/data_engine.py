@@ -1216,6 +1216,7 @@ def extract_income_statement(company_short, pdf_path):
     out["Investment Portfolio"] = extract_investment_portfolio(pdf_path)
     out["Average Claim Size"] = extract_average_claim_size(pdf_path)
     out["NL-45 Claims"] = (extract_nl45_claims(pdf_path), None)
+    out["NL-41 On-roll"] = (extract_nl41_onroll(pdf_path), None)
     out["NL-36 Total Policies"] = extract_nl36_policies(pdf_path)
     out["CSR Amount"] = (extract_nl37_amount_csr(pdf_path), None)
     out["NL-45 Complaint Ratios"] = extract_nl45_complaint_ratios(pdf_path)  # (policy, claim), not (cur, prior)
@@ -1605,6 +1606,47 @@ def extract_office_counts(pdf_path):
         if opening is not None and closing is not None:
             break
     return opening, closing
+
+
+_NL41_ONROLL_RE = re.compile(r"on[\s-]*roll", re.IGNORECASE)
+_NL41_ONROLL_TEXT_RE = re.compile(r"on[\s-]*roll[^\d\n]*?(\d[\d ,]*\d|\d)", re.IGNORECASE)
+
+
+def extract_nl41_onroll(pdf_path):
+    """On-roll employees at the end of the period, from NL-41 item 11 "(a)
+    On-roll" - read directly rather than via Gemini, which misread CARE's
+    FY24-25 Q4 "1 1,518" (11,518) as 13,518. Table cells first (the row's
+    last number), else the page text, where pdfplumber's split digits
+    ("1 1,518") are rejoined. None if not found."""
+    from competitor_analysis.extraction import pdf_cache
+    doc = pdf_cache.get_company_json(pdf_path)
+    for page in doc["pages"]:
+        text = page["text"] or ""
+        if "NL-41" not in text:
+            continue
+        for table in page["tables"]:
+            for row in table:
+                cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                label_at = next((i for i, c in enumerate(cells) if _NL41_ONROLL_RE.search(c)), None)
+                if label_at is None:
+                    continue
+                # The first number after "On-roll", across the label cell
+                # and those right of it (the item number "11" sits left).
+                # Some filers merge a/b/c into one cell pair - NBHI's
+                # "(a) On-roll (b) Off-roll (c) Total" | "(a) 8,936 (b) 408
+                # (c) 9,344" - so neither the last number nor a per-cell
+                # parse is safe.
+                m = _NL41_ONROLL_TEXT_RE.search(" ".join(cells[label_at:]))
+                if m:
+                    v = parse_num(m.group(1).replace(" ", ""))
+                    if v:
+                        return v
+        m = _NL41_ONROLL_TEXT_RE.search(text)
+        if m:
+            v = parse_num(m.group(1).replace(" ", ""))
+            if v:
+                return v
+    return None
 
 
 _GRIEVANCE_PAGE_RE = re.compile(r"GR(?:IE|EI)VANCE\s+DISPOSAL", re.IGNORECASE)  # Care spells it "GREIVANCE"
@@ -2856,11 +2898,20 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         raw_for_derivation[k_above10] = {"fy26_q3": None, "fy25_q3": None, "found": False,
                                          "source_form": None, "page_number": None,
                                          "evidence": None, "notes": None}
-    regrouped = schemas.regroup_by_form(raw_for_derivation, specs)
-
     if company not in apply_income_statement_rows._cache:
         apply_income_statement_rows._cache[company] = extract_income_statement(company, pdf_path)
     inc = apply_income_statement_rows._cache[company]
+
+    # On-roll headcount read straight off NL-41 wins over the model's answer
+    # (which read CARE's FY24-25 Q4 "1 1,518" as 13,518). It feeds both the
+    # Employees row - next year's opening headcount - and this period's
+    # manpower cost per employee.
+    onroll, _ = inc.get("NL-41 On-roll", (None, None))
+    if onroll:
+        raw_for_derivation["employees_onroll"] = {
+            **raw.get("employees_onroll", {}), "fy26_q3": onroll, "found": True,
+            "notes": "NL-41 on-roll, read directly from the filing"}
+    regrouped = schemas.regroup_by_form(raw_for_derivation, specs)
     income = {
         "gwp": inc.get("Gross Written Premium", (None, None)),
         "opex": inc.get("Total Overheads", (None, None)),

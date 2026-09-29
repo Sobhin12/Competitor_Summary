@@ -76,6 +76,10 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     # run it was built for.
     p.apply_income_statement_rows._cache.clear()
     p.apply_segment_income_statement_rows._cache.clear()
+    # NL-36 (Slide 12's channel mix) has the same company-only key: missing
+    # it here made the server's FY26-27 Q1 run draw every company's FY25-26
+    # Q1 channel mix, left over from the FY25-26 Q1 run before it.
+    p._NL36_CACHE.clear()
     # Same class of staleness, lower stakes (nothing reads it back into the
     # workbook, but a long-lived process would otherwise print every earlier
     # run's column-resolution fallbacks mixed into this run's own).

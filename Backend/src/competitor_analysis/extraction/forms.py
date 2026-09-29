@@ -982,8 +982,15 @@ def extract_nl36(pdf_path):
         if start is not None:
             tot = [0.0, 0.0]
             for row in table[start + 1:]:
+                # A sub-row is dash-prefixed ("-Online") or, on filings that
+                # don't dash them (ABHI: "Officers/Employees", "Online ..."),
+                # carries no serial number of its own. The next numbered row
+                # (e.g. "7 Common Service Centres") or a Total row ends it.
                 raw = next((c for c in row[:2] if c), "")
-                if not str(raw).strip().startswith("-"):
+                serial = str(row[0] or "").strip().rstrip(".")
+                label = _norm_label(first_label(row))
+                if not str(raw).strip().startswith("-") and (serial.isdigit() or not label
+                                                             or label.startswith("total")):
                     break
                 v = row_vals(row)
                 for k in (0, 1):

@@ -878,6 +878,25 @@ def lakhs_to_cr(v):
 # most filers print "Commission on Re-insurance Accepted", Care Health just
 # "Add: Re-insurance Accepted". NL-6 has no other "accepted" row, so the bare
 # wording can't pick up the wrong line.
+# NL-6's Gross Commission is the sum of these rows. Narayana prints the
+# Gross row itself as "-" with the figure only in Commission & Remuneration.
+GROSS_COMMISSION_COMPONENTS = ("Commission & Remuneration", "Rewards", "Distribution fees")
+
+
+def _gross_or_components(gross, read):
+    """(cur, prior) Gross Commission: the Gross row as read, unless it is
+    blank/zero in both periods while its component rows carry figures -
+    then the sum of GROSS_COMMISSION_COMPONENTS, each read via `read(label)`
+    -> (cur, prior)."""
+    if any(v for v in gross if v):
+        return gross
+    parts = [read(label) for label in GROSS_COMMISSION_COMPONENTS]
+    if not any(p[k] for p in parts for k in (0, 1)):
+        return gross
+    return tuple(sum(p[k] or 0 for p in parts) if any(p[k] is not None for p in parts) else gross[k]
+                 for k in (0, 1))
+
+
 RI_ACCEPTED_COMMISSION_LABELS = [("Commission on Re-insurance Accepted",), ("Re-insurance Accepted",),
                                  ("Reinsurance Accepted",)]
 
@@ -907,10 +926,14 @@ def extract_income_statement(company_short, pdf_path):
         nl2_text, _ = get_form_text(pdf_path, r"FORM\s+NL-2-B-PL")
 
     if nl4:
-        gdp = get_line_item(nl4, "Gross Direct Premium")
+        # The short labels ("Gross Direct", "Net Written", "Net Earned") are
+        # last-resort variants: Narayana wraps each label over two lines, so
+        # its table cells carry only the first line.
+        gdp = get_line_item_any(nl4, [("Gross Direct Premium",), ("Gross Direct",)])
         ri_accepted = get_line_item_any(nl4, [("Premium on reinsurance accepted",), ("reinsurance accepted",)])
-        nwp = get_line_item(nl4, "Net Written Premium")
-        ep = get_line_item_any(nl4, [("Net Earned Premium",), ("Total Premium Earned (Net)",), ("Premium Earned (Net)",)])
+        nwp = get_line_item_any(nl4, [("Net Written Premium",), ("Net Written",)])
+        ep = get_line_item_any(nl4, [("Net Earned Premium",), ("Total Premium Earned (Net)",), ("Premium Earned (Net)",),
+                                     ("Net Earned",)])
     elif nl4_text:
         gdp = get_line_item_from_text(nl4_text, "Gross Direct Premium", form="NL-4")
         ri_accepted = get_line_item_from_text(nl4_text, "reinsurance accepted", form="NL-4")
@@ -937,11 +960,18 @@ def extract_income_statement(company_short, pdf_path):
     # wasn't available at all for this run (e.g. not yet on disk for the
     # target quarter) - not a silent guess, since GT confirms it's the same
     # number either way.
+    #
+    # The PRIOR year prefers the company's own NL-4 prior column instead:
+    # GIC's "Previous Year" row can disagree with both GIC's own figure for
+    # that year and the filing - FY25-26 Q4's GIC has CARE's FY25 at
+    # 8,296.56 cr against 8,318.25 in last year's GIC and in CARE's NL-4, and
+    # Narayana's FY25 at 0 against 2.37. GIC is the fallback when NL-4 has no
+    # prior figure.
     gic_gdpi = _GIC_GDPI_LOOKUP.get(company_short)
     gic_cur_cr, gic_prior_cr = gic_gdpi if gic_gdpi is not None else (None, None)
     gdp_final = (
         gic_cur_cr * 100 if gic_cur_cr is not None else gdp[0],
-        gic_prior_cr * 100 if gic_prior_cr is not None else gdp[1],
+        gdp[1] if gdp[1] is not None else (gic_prior_cr * 100 if gic_prior_cr is not None else None),
     )
 
     gwp = (_add(gdp_final[0], ri_accepted[0]), _add(gdp_final[1], ri_accepted[1]))
@@ -995,7 +1025,9 @@ def extract_income_statement(company_short, pdf_path):
     if nl6 is None:
         nl6_text, _ = get_form_text(pdf_path, r"FORM\s+NL-6")
     if nl6:
-        gross_commission = get_line_item_any(nl6, [("Gross Commission",), ("Direct Commission",)])
+        gross_commission = _gross_or_components(
+            get_line_item_any(nl6, [("Gross Commission",), ("Direct Commission",)]),
+            lambda label: get_line_item(nl6, label))
         ri_accepted_commission = get_line_item_any(nl6, RI_ACCEPTED_COMMISSION_LABELS)
     elif nl6_text:
         gross_commission = get_line_item_from_text(nl6_text, "Gross Commission", form="NL-6")
@@ -1499,8 +1531,10 @@ def extract_it_capex(pdf_path):
     doc = pdf_cache.get_company_json(pdf_path)
     for page in doc["pages"]:
         text = page["text"] or ""
-        if not (_NL14_PAGE_RE.search(text) and re.search(r"fixed\s+asset", text, re.IGNORECASE)
-                and re.search(r"additions", text, re.IGNORECASE)):
+        # No "Additions" check on the page text: ManipalCigna's FY24-25 Q4
+        # text layer drops that header word (the table cells keep it), and a
+        # page without an Additions column contributes nothing below anyway.
+        if not (_NL14_PAGE_RE.search(text) and re.search(r"fixed\s+asset", text, re.IGNORECASE)):
             continue
         total, found = 0.0, False
         for table in page["tables"]:
@@ -1956,12 +1990,14 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
     nl4, _ = get_form_page(pdf_path, r"FORM\s+NL-4(?!\d)")
     if nl4:
         gdp = get_segment_line_item_any(nl4, segment, [("Gross Direct Premium",),
-                                                        ("Premium from direct business written",)])
+                                                        ("Premium from direct business written",),
+                                                        ("Gross Direct",)])
         ri_prem_accepted = get_segment_line_item(nl4, segment, "reinsurance accepted")
-        nwp = get_segment_line_item(nl4, segment, "Net Written Premium")
+        nwp = get_segment_line_item_any(nl4, segment, [("Net Written Premium",), ("Net Written",)])
         ep = get_segment_line_item_any(nl4, segment, [("Net Earned Premium",),
                                                        ("Total Premium Earned (Net)",),
-                                                       ("Premium Earned (Net)",)])
+                                                       ("Premium Earned (Net)",),
+                                                       ("Net Earned",)])
     else:
         gdp = ri_prem_accepted = nwp = ep = (None, None)
 
@@ -1971,10 +2007,15 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
 
     nl6, _ = get_form_page(pdf_path, r"FORM\s+NL-6")
     if nl6:
-        gross_comm = get_segment_line_item_any(nl6, segment, [("Gross Commission",), ("Direct Commission",)])
+        gross_comm = _gross_or_components(
+            get_segment_line_item_any(nl6, segment, [("Gross Commission",), ("Direct Commission",)]),
+            lambda label: get_segment_line_item(nl6, segment, label))
         ri_comm_accepted = get_segment_line_item_any(nl6, segment, RI_ACCEPTED_COMMISSION_LABELS)
+        # "Less: Commission" last: Narayana's wrapped label keeps only that
+        # first line of "Less: Commission on Re-insurance Ceded".
         ri_comm_ceded = get_segment_line_item_any(nl6, segment, [("Commission on Re-insurance Ceded",),
-                                                                  ("Re-insurance Ceded",), ("Reinsurance Ceded",)])
+                                                                  ("Re-insurance Ceded",), ("Reinsurance Ceded",),
+                                                                  ("Less: Commission",)])
         net_comm = get_segment_line_item(nl6, segment, "Net Commission")
     else:
         gross_comm = ri_comm_accepted = ri_comm_ceded = net_comm = (None, None)
@@ -1995,6 +2036,16 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
 
     gwp = _add(gdp, ri_prem_accepted)
     gross_comm_full = _add(gross_comm, ri_comm_accepted)
+    # Brackets on the ceded line mean different things by filer: Narayana
+    # brackets an ordinary deduction ("Less: Commission (19.37)", net 102.43
+    # = 121.80 - 19.37), while NBHI's FY25 Q1 Travel "(132)" is a genuine
+    # reversal (net 327 = 195 + 132). The printed Net Commission decides:
+    # use whichever sign of the ceded figure reproduces it.
+    def _ceded_as_deduction(g, c, n):
+        if c is None or g is None or n is None:
+            return c
+        return -c if abs(g + c - n) < abs(g - c - n) else c
+    ri_comm_ceded = tuple(_ceded_as_deduction(gross_comm_full[k], ri_comm_ceded[k], net_comm[k]) for k in (0, 1))
     ri_comm_signed = _neg(ri_comm_ceded)
 
     out["Gross Written Premium"] = tuple(lakhs_to_cr(v) for v in gwp)

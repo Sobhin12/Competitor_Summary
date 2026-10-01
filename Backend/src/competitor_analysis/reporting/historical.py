@@ -18,7 +18,7 @@ full year-by-year series - a different shape entirely, hence a separate
 loader rather than an extension of data.py.
 
 Maintained by hand, once a year, and placed at that path directly (no
-upload endpoint) - see storage/r2.py's restore_all(), which pulls it down
+upload endpoint) - see storage/s3.py's restore_all(), which pulls it down
 on a fresh container instance the same way as every other data/ input.
 """
 import ast

@@ -20,7 +20,7 @@ from competitor_analysis import logging_setup
 from competitor_analysis import paths
 from competitor_analysis.api import runs as runs_mod
 from competitor_analysis.api.runs import REGISTRY
-from competitor_analysis.storage import r2
+from competitor_analysis.storage import s3
 
 logging_setup.configure()
 
@@ -50,8 +50,8 @@ app.add_middleware(
 @app.on_event("startup")
 def _restore_documents_from_r2():
     """Pull previously-synced downloads/reports back onto local disk. A
-    no-op when R2 isn't configured (plain local dev)."""
-    r2.restore_all()
+    no-op when S3 isn't configured (plain local dev)."""
+    s3.restore_all()
 
 # Derived from the clock, newest first - no annual edit needed. A caller may
 # also POST any other financial year; /api/pipeline/run normalises whatever
@@ -442,7 +442,7 @@ def delete_downloaded_file(run_id: str, company_id: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"No downloaded file for {cs.name} to remove.")
     os.remove(path)
-    r2.delete_file(path)
+    s3.delete_file(path)
     cs.retrieval_status = "missing"
     cs.retrieval_progress = 0
     cs.size = None
@@ -466,14 +466,14 @@ async def upload_downloaded_file(run_id: str, company_id: str, file: UploadFile 
             detail=f"{cs.name} expects a {expected_ext} file, got {uploaded_ext}.")
     paths.ensure_parent(path)
     size = await _stream_upload_to_disk(file, path)
-    # r2.upload_file is a blocking network call (boto3); this endpoint is
+    # s3.upload_file is a blocking network call (boto3); this endpoint is
     # async (it awaits file.read()), so FastAPI does NOT run it in a
     # threadpool the way it does for plain `def` endpoints - calling the
     # blocking upload directly here would stall the single asyncio event
     # loop for the whole PUT, which behind Render's HTTP/2 edge proxy shows
     # up client-side as net::ERR_HTTP2_PROTOCOL_ERROR instead of a normal
     # slow response.
-    await asyncio.to_thread(r2.upload_file, path)
+    await asyncio.to_thread(s3.upload_file, path)
     cs.retrieval_status = "done"
     cs.retrieval_progress = 100
     cs.size = size
@@ -553,6 +553,6 @@ async def upload_data_engine(run_id: str, file: UploadFile = File(...)):
     # See the matching comment in upload_downloaded_file: this is an async
     # endpoint, so the blocking r2 upload must be offloaded or it stalls the
     # event loop for the whole request.
-    await asyncio.to_thread(r2.upload_file, run.data_engine_path)
+    await asyncio.to_thread(s3.upload_file, run.data_engine_path)
     run.log("info", f"Data Engine workbook replaced manually ({size} bytes).")
     return _serialise_run(run)

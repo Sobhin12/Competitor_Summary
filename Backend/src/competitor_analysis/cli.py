@@ -180,7 +180,7 @@ def run_append_history(fy: str, quarter: str, data_engine_path: str | None = Non
     """Adds the year a reviewed Q4 Data Engine completes to
     data/historical/Historical_Trends.xlsx - append-only (see
     historical.append_year_from_data_engine), then uploads the workbook to
-    R2 (a no-op without R2 credentials)."""
+    S3 (a no-op without S3 credentials)."""
     cfg.set_period(fy, quarter)
     fy, quarter = cfg.FY, cfg.QUARTER
     if quarter != "Q4":
@@ -188,10 +188,10 @@ def run_append_history(fy: str, quarter: str, data_engine_path: str | None = Non
     data_engine_path = _resolve_data_engine(fy, quarter, data_engine_path)
 
     from dotenv import load_dotenv
-    load_dotenv()  # before storage.r2 reads its credentials at import
+    load_dotenv()  # before storage.s3 reads its credentials at import
     from competitor_analysis import paths
     from competitor_analysis.reporting import historical
-    from competitor_analysis.storage import r2
+    from competitor_analysis.storage import s3
 
     with phase("Historical append"):
         log.info("%s from %s%s", "Dry run" if dry_run else "Appending", data_engine_path,
@@ -203,7 +203,7 @@ def run_append_history(fy: str, quarter: str, data_engine_path: str | None = Non
                  "would be written (dry run)" if dry_run else "written")
         if result["backup"]:
             log.info("Backup of the previous workbook: %s", result["backup"])
-            r2.upload_file(paths.HISTORICAL_TRENDS_WORKBOOK)
+            s3.upload_file(paths.HISTORICAL_TRENDS_WORKBOOK)
     return result
 
 

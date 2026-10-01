@@ -148,7 +148,7 @@ def _cache_path(company):
 def _content_fingerprint(pdf_path):
     """(sha256, size) of the source PDF - the cache's validity key.
 
-    Deliberately NOT mtime. The cache is synced to R2 and restored onto a
+    Deliberately NOT mtime. The cache is synced to S3 and restored onto a
     fresh container, and a download rewrites mtime to "now" even when the
     bytes are identical - so an mtime key discarded the restored cache
     immediately and re-parsed everything, defeating the sync. Content

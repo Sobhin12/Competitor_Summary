@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from competitor_analysis import config as cfg
 from competitor_analysis import logging_setup
 from competitor_analysis import paths
-from competitor_analysis.storage import r2
+from competitor_analysis.storage import s3
 
 log = logging_setup.get_logger(__name__)
 
@@ -457,7 +457,7 @@ def _execute(run: RunState, stages: tuple):
             # Runs also pause at "awaiting_review"/"awaiting_report" with real
             # files already on disk, so sync regardless of which state this run
             # landed in.
-            r2.sync_run_outputs()
+            s3.sync_run_outputs()
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +634,7 @@ def _execute_fetch_missing(run: RunState, companies: list[str] | None):
             log.error("Automatic fetch failed: %s: %s", type(e).__name__, e)
         finally:
             run.status = "awaiting_review"
-            r2.sync_run_outputs()
+            s3.sync_run_outputs()
 
 
 def _start_parse_prewarm(run: RunState):

@@ -139,6 +139,7 @@ export const API = {
   getHighlights: (period) => request(`/analysis/highlights${q({ period })}`),
   getNarrative: (period, refresh = false) => request(`/analysis/narrative${q({ period, refresh: refresh || null })}`),
   getDeepDive: (company, period) => request(`/analysis/deepdive/${encodeURIComponent(company)}${q({ period })}`),
+  getNews: (company, refresh = false) => request(`/analysis/news${q({ company, refresh: refresh || null })}`),
   streamChat,
 
   // -- metadata ------------------------------------------------------------

@@ -3,6 +3,7 @@
     GET  /api/analysis/meta                     periods, companies, metric catalog, LLM status
     GET  /api/analysis/highlights?period=       rule-based insights + data checks
     GET  /api/analysis/narrative?period=        LLM executive narrative over those insights
+    GET  /api/analysis/news?company=&refresh=   recent news per competitor (Parallel search + Gemini tags)
     GET  /api/analysis/deepdive/{company}       one competitor's full picture
     GET  /api/analysis/compare?metric=&period=  one metric across companies
     GET  /api/analysis/trend?metric=            one metric over time
@@ -21,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from competitor_analysis.analysis import agent as agent_mod
-from competitor_analysis.analysis import deepdive, insights, llm, narrative
+from competitor_analysis.analysis import deepdive, insights, llm, narrative, news
 from competitor_analysis.analysis import store as S
 from competitor_analysis.analysis import tools as T
 
@@ -71,6 +72,16 @@ def narrative_route(period: str | None = None, refresh: bool = False):
         raise HTTPException(503, f"No LLM configured: {e}")
     except Exception as e:  # noqa: BLE001 - provider outage etc.; the cards still render without it
         raise HTTPException(502, f"Narrative generation failed: {str(e)[:300]}")
+
+
+@router.get("/news")
+async def news_route(company: str | None = None, refresh: bool = False):
+    try:
+        return await news.get_news(company, refresh)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except news.NewsUnavailable as e:
+        raise HTTPException(503, f"News unavailable: {e}")
 
 
 @router.get("/deepdive/{company}")

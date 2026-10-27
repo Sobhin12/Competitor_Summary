@@ -6,6 +6,7 @@ import { OverviewView, RetrievalView, ExtractionView, ReportsView } from "./view
 import { HighlightsView } from "./highlights.jsx";
 import { CompetitorsView } from "./competitors.jsx";
 import { ChatView } from "./chat.jsx";
+import { NewsView } from "./news.jsx";
 
 // v2 analysis views. They read every Data Engine produced so far (all
 // quarters + FY18 history) through /api/analysis, so they don't use the
@@ -13,6 +14,7 @@ import { ChatView } from "./chat.jsx";
 const ANALYSIS_NAV = [
   { key: "highlights", label: "Quarter Highlights", icon: "bell" },
   { key: "competitors", label: "Competitors", icon: "users" },
+  { key: "news", label: "News", icon: "fileText" },
   { key: "chat", label: "Ask the Data", icon: "edit" },
 ];
 const ANALYSIS_KEYS = new Set(ANALYSIS_NAV.map((n) => n.key));
@@ -789,6 +791,7 @@ export default function App() {
           )}
           {view === "reporting" && <ReportsView state={state} onDownload={downloadReport} />}
           {view === "highlights" && <HighlightsView onAsk={askInChat} />}
+          {view === "news" && <NewsView />}
           {view === "competitors" && <CompetitorsView onAsk={askInChat} />}
           {view === "chat" && (
             <ChatView messages={chatMessages} setMessages={setChatMessages}

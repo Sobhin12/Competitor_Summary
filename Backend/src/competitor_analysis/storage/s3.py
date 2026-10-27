@@ -23,6 +23,7 @@ is unaffected.
 """
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -46,6 +47,8 @@ _BUCKET = os.getenv("S3_BUCKET_NAME")
 # Both unset -> boto3's default AWS resolution (needs S3_REGION for real S3).
 _ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
 _REGION = os.getenv("S3_REGION")
+
+_RESTORE_WORKERS = int(os.getenv("S3_RESTORE_WORKERS", "8"))
 
 _client = None
 _client_checked = False
@@ -132,15 +135,40 @@ def download_tree(prefix: str) -> None:
     if client is None:
         return
     paginator = client.get_paginator("list_objects_v2")
+    todo, skipped = [], 0
     try:
         for page in paginator.paginate(Bucket=_BUCKET, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
+                if key.endswith("/"):
+                    continue
                 dest = paths.BACKEND_ROOT / key
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                client.download_file(_BUCKET, key, str(dest))
+                # Same size already on disk -> nothing to fetch, so a restart
+                # of a warm instance does almost no network work.
+                if dest.is_file() and dest.stat().st_size == obj["Size"]:
+                    skipped += 1
+                    continue
+                todo.append((key, dest))
     except Exception:
-        logger.exception("S3 restore failed for prefix %s", prefix)
+        logger.exception("S3 restore failed to list prefix %s", prefix)
+        return
+
+    def _fetch(item):
+        key, dest = item
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(_BUCKET, key, str(dest))
+            return True
+        except Exception:
+            logger.exception("S3 restore failed for %s", key)
+            return False
+
+    # boto3 clients are thread-safe; downloads are latency-bound, so a small
+    # pool gives a large speed-up without risking memory on small containers.
+    with ThreadPoolExecutor(max_workers=_RESTORE_WORKERS) as pool:
+        ok = sum(pool.map(_fetch, todo))
+    logger.info("S3 restore %s: %d downloaded, %d already present, %d failed",
+                prefix, ok, skipped, len(todo) - ok)
 
 
 def restore_all() -> None:
@@ -150,6 +178,7 @@ def restore_all() -> None:
     download_tree("artifacts/output")
     # pdf_json only - never artifacts/cache/gemini (see module docstring).
     download_tree("artifacts/cache/pdf_json")
+    download_tree("artifacts/cache/news")
 
 
 def sync_run_outputs() -> None:

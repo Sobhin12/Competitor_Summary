@@ -572,6 +572,15 @@ def get_line_item(fp: FormPage, *label_substrings, cur_year_frag=None, prior_yea
     matches = fp.find_rows(*label_substrings)
     if not matches:
         return None, None
+    return merge_row_values(fp, matches, cur_year_frag, prior_year_frag)
+
+
+def merge_row_values(fp: FormPage, matches, cur_year_frag, prior_year_frag):
+    """(current, prior) cumulative values merged across `matches` - the
+    [(row, table_idx, row_idx)] hits for ONE line item, which can repeat once
+    per year-block. Split out of get_line_item so a caller that has already
+    matched its rows by exact label (rather than substring) shares the
+    column resolution."""
     cur_val = prior_val = None
     for row, ti, ridx in matches:
         events = fp._events(ti)

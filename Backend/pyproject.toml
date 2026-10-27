@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv",
     # Phase 2 - extraction
     "pdfplumber",
+    "pypdfium2",
     "pypdf",
     "openpyxl",
     "google-genai",

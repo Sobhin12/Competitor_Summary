@@ -30,6 +30,9 @@ log = logging_setup.get_logger(__name__)
 
 CACHE_ROOT = str(paths.PDF_JSON_CACHE)
 
+# Escape hatch: parse every page with pdfplumber, as before the quick-scan gate.
+PARSE_ALL_PAGES = os.getenv("PDF_PARSE_ALL_PAGES", "") in ("1", "true", "True")
+
 # Canonical per-company filenames now live in pipeline_config (period-
 # independent config the UI also needs); re-exported here since callers
 # already reference pdf_cache.COMPANY_PDF_FILENAMES.
@@ -135,9 +138,19 @@ FORM_PATTERNS = {
 def _company_for_path(pdf_path, company=None):
     if company:
         return company
-    return _PDF_TO_COMPANY.get(
-        os.path.normpath(pdf_path), os.path.splitext(os.path.basename(pdf_path))[0]
-    )
+    known = _PDF_TO_COMPANY.get(os.path.normpath(pdf_path))
+    if known:
+        return known
+    # Not in the period map (e.g. called before refresh_company_pdfs saw the
+    # file): resolve by filename so the cache entry still lands under the
+    # canonical short key. Falling back to the bare basename created a second
+    # cache file per company ("ABHI.json" and "Aditya_Birla_Health_Insurance
+    # .json") and parsed the same filing twice.
+    base = os.path.basename(pdf_path)
+    for short, filename in COMPANY_PDF_FILENAMES.items():
+        if filename == base:
+            return short
+    return os.path.splitext(base)[0]
 
 
 def _cache_path(company):
@@ -162,13 +175,78 @@ def _content_fingerprint(pdf_path):
     return h.hexdigest(), os.path.getsize(pdf_path)
 
 
-def parse_pdf_to_json(pdf_path, company):
+# Pages worth the (slow) pdfplumber pass. A filing is ~60 pages but only ~20
+# carry a schedule anything reads, and pdfplumber costs ~0.3s/page against
+# ~0.004s/page for pdfium's plain text. Every consumer's page selector must be
+# covered here, or its page would silently come back empty: FORM_PATTERNS
+# (which also feed the Gemini payloads), the three selectors that scan the
+# whole document themselves (NL-14 capex, grievance disposal, NL-41 mentions),
+# plus the page FOLLOWING an NL-37 page (its continuation block is read too).
+# Deliberately looser than the per-form patterns (e.g. NL-29's line anchor is
+# dropped, since whitespace is collapsed before matching) - a false positive
+# only costs one page's parse, a false negative loses data.
+_GATE_EXTRA = (
+    r"NL\s*-?\s*14\b",
+    r"GR(?:IE|EI)VANCE\s+DISPOSAL",
+    r"NL-41",
+    r"NL-29(?!\d)",
+)
+_GATE_PATTERNS = [re.compile(p, re.IGNORECASE)
+                  for _, p in FORM_PATTERNS.values()] + \
+                 [re.compile(p, re.IGNORECASE) for p in _GATE_EXTRA]
+_GATE_FOLLOW_PATTERN = re.compile(r"FORM\s+NL-37", re.IGNORECASE)
+# Part of the cache's validity: bumping the gate (a new consumer pattern)
+# invalidates every gated entry instead of serving pages parsed without it.
+GATE_SIGNATURE = hashlib.sha256(
+    "|".join([p for _, p in FORM_PATTERNS.values()] + list(_GATE_EXTRA)
+             + [_GATE_FOLLOW_PATTERN.pattern]).encode()).hexdigest()[:12]
+
+
+def relevant_page_indexes(pdf_path):
+    """0-based indexes of the pages that need the full pdfplumber parse, or
+    None when the quick scan can't be trusted (then every page is parsed -
+    slower, never wrong)."""
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(pdf_path)
+        try:
+            keep = set()
+            n = len(pdf)
+            for i in range(n):
+                page = pdf[i]
+                try:
+                    text = " ".join(page.get_textpage().get_text_bounded().split())
+                finally:
+                    page.close()
+                if any(p.search(text) for p in _GATE_PATTERNS):
+                    keep.add(i)
+                if _GATE_FOLLOW_PATTERN.search(text) and i + 1 < n:
+                    keep.add(i + 1)
+        finally:
+            pdf.close()
+    except Exception as e:  # pdfium missing or unreadable text layer
+        log.warning("quick page scan unavailable for %s (%s: %s) - parsing every page.",
+                    os.path.basename(pdf_path), type(e).__name__, e)
+        return None
+    return keep or None
+
+
+def parse_pdf_to_json(pdf_path, company, only_pages=None):
     """One pdfplumber pass: every page's number, detected form(s), tables and
     raw text - both tables and text are stored (not just whichever exists)
-    since different callers need one or the other."""
+    since different callers need one or the other.
+
+    `only_pages` (a set of 0-based indexes) restricts the pdfplumber work to
+    those pages; the rest are kept as empty placeholders so page numbers and
+    the neighbour-page lookups keep their positions."""
     pages_out = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
+            if only_pages is not None and i not in only_pages:
+                pages_out.append({"page_number": i + 1, "forms_detected": [],
+                                  "tables": [], "text": "", "skipped": True})
+                page.close()
+                continue
             text = page.extract_text() or ""
             forms_detected = [
                 key for key, (_, pattern) in FORM_PATTERNS.items()
@@ -196,7 +274,7 @@ def parse_pdf_to_json(pdf_path, company):
             # this one filing instead of the whole container.
             memory.check(f"{company} (parsing page {i + 1}/{len(pdf.pages)})")
     sha, size = _content_fingerprint(pdf_path)
-    return {
+    doc = {
         "company": company,
         "source_path": pdf_path,
         "source_file": os.path.basename(pdf_path),
@@ -204,6 +282,9 @@ def parse_pdf_to_json(pdf_path, company):
         "pdf_size": size,
         "pages": pages_out,
     }
+    if only_pages is not None:
+        doc["gate_signature"] = GATE_SIGNATURE
+    return doc
 
 
 # One lock per company. The cache now has two writers - extraction, and the
@@ -230,9 +311,45 @@ def _read_cached(cache_path, pdf_path):
             cached = json.load(f)
         sha, size = _content_fingerprint(pdf_path)
         if cached.get("pdf_sha256") == sha and cached.get("pdf_size") == size:
-            return cached
+            # A full parse (no gate_signature) satisfies any gate; a gated one
+            # only the gate it was built with.
+            if cached.get("gate_signature") in (None, GATE_SIGNATURE):
+                return cached
     except (json.JSONDecodeError, OSError):
         pass
+    return None
+
+
+# In-process memo of validated cache entries. Each company's JSON used to be
+# re-read from disk and its PDF re-hashed on EVERY get_form_page call (~20 per
+# company per run). The memo is keyed by cache path and guarded by the stat
+# signature of both files, so a replaced PDF or rewritten cache entry is
+# still noticed without re-reading either.
+_MEMO = {}
+_MEMO_GUARD = threading.Lock()
+
+
+def _stat_signature(pdf_path, cache_path):
+    try:
+        a, b = os.stat(pdf_path), os.stat(cache_path)
+    except OSError:
+        return None
+    return (a.st_size, a.st_mtime_ns, b.st_size, b.st_mtime_ns)
+
+
+def _remember(cache_path, pdf_path, doc):
+    sig = _stat_signature(pdf_path, cache_path)
+    if sig is not None:
+        with _MEMO_GUARD:
+            _MEMO[cache_path] = (sig, doc)
+    return doc
+
+
+def _recall(cache_path, pdf_path):
+    with _MEMO_GUARD:
+        hit = _MEMO.get(cache_path)
+    if hit and hit[0] == _stat_signature(pdf_path, cache_path):
+        return hit[1]
     return None
 
 
@@ -245,9 +362,12 @@ def get_company_json(pdf_path, company=None, force_refresh=False):
     company = _company_for_path(pdf_path, company)
     cache_path = _cache_path(company)
     if not force_refresh:
+        doc = _recall(cache_path, pdf_path)
+        if doc is not None:
+            return doc
         cached = _read_cached(cache_path, pdf_path)
         if cached is not None:
-            return cached
+            return _remember(cache_path, pdf_path, cached)
     with _parse_lock(company):
         # Re-check under the lock: another thread may have parsed this exact
         # filing while we waited, and re-parsing it would double the single
@@ -255,8 +375,10 @@ def get_company_json(pdf_path, company=None, force_refresh=False):
         if not force_refresh:
             cached = _read_cached(cache_path, pdf_path)
             if cached is not None:
-                return cached
-        doc = parse_pdf_to_json(pdf_path, company)
+                return _remember(cache_path, pdf_path, cached)
+        only = None if PARSE_ALL_PAGES else relevant_page_indexes(pdf_path)
+        doc = (parse_pdf_to_json(pdf_path, company) if only is None
+               else parse_pdf_to_json(pdf_path, company, only_pages=only))
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         # Written via a temp file and renamed, so a reader never sees a
         # half-written cache entry - os.replace is atomic on both POSIX and
@@ -265,7 +387,7 @@ def get_company_json(pdf_path, company=None, force_refresh=False):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(doc, f, ensure_ascii=False, default=str)
         os.replace(tmp, cache_path)
-        return doc
+        return _remember(cache_path, pdf_path, doc)
 
 
 def pages_for_form(doc_json, form_key, max_pages=None):

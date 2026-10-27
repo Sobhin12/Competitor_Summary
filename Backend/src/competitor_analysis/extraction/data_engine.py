@@ -922,7 +922,7 @@ def extract_income_statement(company_short, pdf_path):
 
     nl1, _ = get_form_page(pdf_path, r"FORM\s+NL-1-B-RA")
     nl2, _ = get_form_page(pdf_path, r"FORM\s+NL-2-B-PL")
-    nl4, _ = get_form_page(pdf_path, r"FORM\s+NL-4")
+    nl4, _ = get_form_page(pdf_path, r"FORM\s+NL-4(?!\d)")
 
     # Fallback for PDFs with no ruled gridlines (table detection then finds
     # nothing even though the page matched) - e.g. Narayana Health - use the
@@ -934,7 +934,7 @@ def extract_income_statement(company_short, pdf_path):
     # is right for one column and wrong for another.
     nl1_text = nl2_text = nl4_text = None
     if nl4 is None:
-        nl4_text, _ = get_form_text(pdf_path, r"FORM\s+NL-4")
+        nl4_text, _ = get_form_text(pdf_path, r"FORM\s+NL-4(?!\d)")
     if nl1 is None:
         nl1_text, _ = get_form_text(pdf_path, r"FORM\s+NL-1-B-RA")
     if nl2 is None:

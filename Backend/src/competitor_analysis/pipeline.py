@@ -4,8 +4,8 @@ End-to-end Phase 2 pipeline runner.
 Assumes the source documents are already present locally (GIC.xlsx and the
 7 insurers' disclosure PDFs under downloads/{FY}/{Quarter}/) - does NOT call
 scraper.py / Phase 1 at all. Fills Data_Engine_UI.xlsx from scratch (run this
-against a sheet with FY26_Q3/FY25_Q3/Growth already cleared), then compares
-Fills the Data Engine workbook from the sources on disk.
+against a sheet with FY26_Q3/FY25_Q3/Growth already cleared). Fills the Data Engine
+workbook from the sources on disk.
 
 run_phase2() is the reusable core (stages 1-4, no load/save/GT-compare) -
 cli.py calls it directly with an existence-filtered company

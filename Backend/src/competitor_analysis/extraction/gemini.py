@@ -25,7 +25,7 @@ from google import genai
 from google.genai import types
 from pydantic import ValidationError
 
-from competitor_analysis.extraction import pdf_cache
+from competitor_analysis.extraction import direct_reads, pdf_cache
 from competitor_analysis import config as cfg
 from competitor_analysis.extraction.pdf_cache import COMPANY_PDFS, FORM_PATTERNS
 from competitor_analysis.extraction.schemas import (
@@ -621,7 +621,8 @@ async def _call_with_retry(company, payload, batch, limiter, max_attempts=5):
 
 def _batches(metric_specs, batch_size):
     """(batch, forms_needed) pairs. Batching exists because large single calls
-    (75+ metrics) were rejected by the API; ~40 worked reliably."""
+    (75+ metrics) were rejected by the API; 20 is the measured-safe size (40
+    returns 400 INVALID_ARGUMENT - see DEFAULT_BATCH_SIZE)."""
     for i in range(0, len(metric_specs), batch_size):
         batch = metric_specs[i:i + batch_size]
         yield batch, sorted({f for m in batch for f in m["forms"]})
@@ -640,11 +641,42 @@ def extract_company_metrics(company, pdf_path, metric_specs, batch_size=DEFAULT_
         company, pdf_path, metric_specs, batch_size, all_forms))
 
 
+# Reading plain labelled-row schedules (NL-34 states, NL-36 channels) straight
+# off the cached PDF tables, and sending only what that could not resolve to
+# the model, is what takes a company from 6 calls to a fraction of that. Set
+# DIRECT_READS=0 to send every metric to the model as before.
+USE_DIRECT_READS = os.getenv("DIRECT_READS", "1") not in ("0", "false", "False")
+DIRECT_STATS = {"direct": 0, "model": 0}
+
+
+def split_direct(pdf_path, metric_specs):
+    """(direct_answers, remaining_specs): what direct_reads could resolve from
+    this company's filing, and the specs still needing the model - ordered by
+    form so each batch (and therefore each call's payload) stays small."""
+    direct = {}
+    if USE_DIRECT_READS:
+        wanted = {m["key"] for m in metric_specs}
+        try:
+            direct = direct_reads.read_all(pdf_cache.get_company_json(pdf_path), wanted)
+        except Exception as e:  # noqa: BLE001 - the model path is always the safe fallback
+            log.warning("direct reads unavailable for %s (%s: %s) - using the model for everything.",
+                        os.path.basename(str(pdf_path)), type(e).__name__, e)
+    remaining = [m for m in metric_specs if m["key"] not in direct]
+    remaining.sort(key=lambda m: tuple(m["forms"]))  # stable: spec order within a form
+    DIRECT_STATS["direct"] += len(direct)
+    DIRECT_STATS["model"] += len(remaining)
+    return direct, remaining
+
+
 async def extract_company_metrics_async(company, pdf_path, metric_specs,
                                         batch_size=DEFAULT_BATCH_SIZE, all_forms=None,
                                         semaphore=None, limiter=None):
     all_forms = all_forms or sorted({f for m in metric_specs for f in m["forms"]})
     full_payload = build_company_payload(pdf_path, all_forms)
+    direct, metric_specs = split_direct(pdf_path, metric_specs)
+    if direct:
+        log.info("%s: %d metric(s) read directly from the filing, %d left for the model.",
+                 company, len(direct), len(metric_specs))
     semaphore = semaphore or asyncio.Semaphore(MAX_CONCURRENT_GEMINI)
     limiter = limiter if limiter is not None else RateLimiter(GEMINI_RPM)
 
@@ -658,7 +690,7 @@ async def extract_company_metrics_async(company, pdf_path, metric_specs,
     results = await asyncio.gather(*[
         run_batch(batch, forms) for batch, forms in _batches(metric_specs, batch_size)
     ])
-    out = {}
+    out = dict(direct)
     for r in results:
         out.update(r)
     return out

@@ -1,8 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { API } from "./api.js";
 import { AppIcon } from "./Icons.jsx";
 import { Button, Spinner, useToast } from "./ui.jsx";
 import { OverviewView, RetrievalView, ExtractionView, ReportsView } from "./views.jsx";
+import { HighlightsView } from "./highlights.jsx";
+import { CompetitorsView } from "./competitors.jsx";
+import { ChatView } from "./chat.jsx";
+
+// v2 analysis views. They read every Data Engine produced so far (all
+// quarters + FY18 history) through /api/analysis, so they don't use the
+// pipeline's FY/Quarter selector or run controls in the header.
+const ANALYSIS_NAV = [
+  { key: "highlights", label: "Quarter Highlights", icon: "bell" },
+  { key: "competitors", label: "Competitors", icon: "users" },
+  { key: "chat", label: "Ask the Data", icon: "edit" },
+];
+const ANALYSIS_KEYS = new Set(ANALYSIS_NAV.map((n) => n.key));
 
 // Sections of the generated PDF. Descriptive only: the backend builds the
 // report in a single call, so these are marked complete together when the
@@ -63,6 +76,14 @@ export default function App() {
   const [fyOptions, setFyOptions] = useState(["FY25-26"]);
   const [quarterOptions, setQuarterOptions] = useState(["Q1", "Q2", "Q3", "Q4"]);
   const [view, setView] = useState("overview");
+  // Chat lives here, not in ChatView, so a conversation survives switching
+  // views; `chatSeed` carries an "Ask more" question from another view.
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatSeed, setChatSeed] = useState(null);
+  const askInChat = useCallback((text) => {
+    setChatSeed({ text, nonce: Date.now() });
+    setView("chat");
+  }, []);
 
   const [backend, setBackend] = useState({ status: "connecting", detail: null });
   const [companyList, setCompanyList] = useState([]);
@@ -529,7 +550,9 @@ export default function App() {
   const NAV = [
     { key: "overview", label: "Overview", icon: "layoutGrid" },
     ...EMPTY_PHASES.map((p) => ({ key: p.key, label: p.label, icon: p.icon })),
+    ...ANALYSIS_NAV.map((n, i) => ({ ...n, heading: i === 0 ? "Analysis" : null })),
   ];
+  const isAnalysis = ANALYSIS_KEYS.has(view);
 
   const connBadge = {
     connecting: ["text-slate-400 bg-slate-500/10 border-slate-500/25", "bg-slate-400", "Connecting…"],
@@ -554,8 +577,13 @@ export default function App() {
           {NAV.map((n) => {
             const phase = phases.find((p) => p.key === n.key);
             return (
+              <Fragment key={n.key}>
+              {n.heading && (
+                <div className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+                  {n.heading}
+                </div>
+              )}
               <button
-                key={n.key}
                 onClick={() => setView(n.key)}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                   view === n.key ? "bg-brand-500/15 text-white border border-brand-500/30" : "text-slate-400 hover:text-white hover:bg-slate-900"
@@ -579,6 +607,7 @@ export default function App() {
                   />
                 )}
               </button>
+              </Fragment>
             );
           })}
         </nav>
@@ -596,7 +625,21 @@ export default function App() {
       </aside>
 
       {/* Main */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 h-screen">
+        {isAnalysis ? (
+          <header className="h-16 border-b border-slate-800 bg-slate-950/60 backdrop-blur flex items-center justify-between px-6 gap-4 shrink-0">
+            <div className="text-xs text-slate-500">
+              Analysis across every quarter extracted so far, plus full-year history from FY18.
+            </div>
+            <div
+              title={backend.detail || ""}
+              className={`flex items-center gap-1.5 text-xs border rounded-full px-2.5 py-1 ${connBadge[0]}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${connBadge[1]} ${backend.status !== "online" ? "animate-pulse" : ""}`} />
+              {connBadge[2]}
+            </div>
+          </header>
+        ) : (
         <header className="h-16 border-b border-slate-800 bg-slate-950/60 backdrop-blur flex items-center justify-between px-6 gap-4 shrink-0">
           <div className="flex items-center gap-3">
             {customFy ? (
@@ -711,8 +754,9 @@ export default function App() {
             )}
           </div>
         </header>
+        )}
 
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className={`flex-1 overflow-y-auto p-6 ${view === "chat" ? "pb-0" : ""}`}>
           {view === "overview" && (
             <OverviewView
               state={state}
@@ -744,6 +788,12 @@ export default function App() {
             />
           )}
           {view === "reporting" && <ReportsView state={state} onDownload={downloadReport} />}
+          {view === "highlights" && <HighlightsView onAsk={askInChat} />}
+          {view === "competitors" && <CompetitorsView onAsk={askInChat} />}
+          {view === "chat" && (
+            <ChatView messages={chatMessages} setMessages={setChatMessages}
+                      seed={chatSeed} onSeedUsed={() => setChatSeed(null)} />
+          )}
         </main>
       </div>
     </div>

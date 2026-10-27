@@ -76,9 +76,70 @@ async function requestFile(path, method, formData) {
   return res.json();
 }
 
+/** POST to the chat endpoint and parse its Server-Sent Events stream, calling
+ * onEvent(event, data) for each one (text, tool_status, chart, table,
+ * verification, citations, done, error). Resolves when the stream ends. */
+async function streamChat(messages, period, onEvent, signal) {
+  let res;
+  try {
+    res = await fetch(`${BASE}/api/analysis/chat`, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, period }),
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    throw new ApiError("Cannot reach the backend. Is it running on port 8000?", 0, String(cause));
+  }
+  if (!res.ok) {
+    let detail = null;
+    try {
+      detail = (await res.json())?.detail ?? null;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(detail || `Request failed (${res.status})`, res.status, detail);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf("\n\n")) !== -1) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      let event = null;
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      if (event) onEvent(event, data ? JSON.parse(data) : null);
+    }
+  }
+}
+
+const q = (params) => {
+  const s = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null && v !== "")).toString();
+  return s ? `?${s}` : "";
+};
+
 export const API = {
   isConnected: true,
   ApiError,
+
+  // -- v2 analysis -----------------------------------------------------------
+  // Read-only views over every Data Engine produced so far (all quarters plus
+  // the FY18+ history), independent of the pipeline run selected above.
+  getAnalysisMeta: () => request("/analysis/meta"),
+  getHighlights: (period) => request(`/analysis/highlights${q({ period })}`),
+  getNarrative: (period, refresh = false) => request(`/analysis/narrative${q({ period, refresh: refresh || null })}`),
+  getDeepDive: (company, period) => request(`/analysis/deepdive/${encodeURIComponent(company)}${q({ period })}`),
+  streamChat,
 
   // -- metadata ------------------------------------------------------------
   health: () => request("/health"),

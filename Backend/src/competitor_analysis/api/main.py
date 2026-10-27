@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from competitor_analysis import config as cfg
 from competitor_analysis import logging_setup
 from competitor_analysis import paths
+from competitor_analysis.api import analysis_routes
 from competitor_analysis.api import runs as runs_mod
 from competitor_analysis.api.runs import REGISTRY
 from competitor_analysis.storage import s3
@@ -45,6 +46,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# v2 interactive analysis: highlights, deep-dive, chat (api/analysis_routes.py).
+app.include_router(analysis_routes.router)
 
 
 @app.on_event("startup")

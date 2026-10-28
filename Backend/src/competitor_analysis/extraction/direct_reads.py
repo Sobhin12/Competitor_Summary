@@ -413,6 +413,7 @@ def read_nl29(doc):
     if v:
         put("debt_rating_Sovereign", v, "Sovereign")
     # "Rated below A" is the sum of its two sub-rows when it is not one row.
+    summed = False
     single = next((i for i in range(rating_end) if labels[i] == "ratedbelowa"), None)
     below_b = find(0, rating_end, ("ratedbelowb",))
     but_b = find(0, rating_end, ("ratedbelowabutaboveb",))
@@ -421,10 +422,14 @@ def read_nl29(doc):
     elif but_b is not None or below_b is not None:
         parts = [pair(i) for i in (but_b, below_b) if i is not None]
         v = (sum(p[0] for p in parts), sum(p[1] for p in parts)) if all(parts) else None
+        summed = v is not None
     else:
         v = None
     if v:
         put("debt_rating_Rated below A", v, "Rated below A")
+        if summed:
+            out["debt_rating_Rated below A"]["notes"] = (
+                "Sum of the 'Rated below A but above B' and 'Rated below B' sub-rows (no single row printed)")
     for bucket, prefixes in _MATURITY_ROWS.items():
         i = find(marker + 1, maturity_end, prefixes)
         v = pair(i) if i is not None else None

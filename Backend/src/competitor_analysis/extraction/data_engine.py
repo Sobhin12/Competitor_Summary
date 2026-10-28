@@ -41,6 +41,7 @@ from competitor_analysis import config as cfg
 from competitor_analysis import memory
 from competitor_analysis import paths
 from competitor_analysis.rounding import round_half_up
+from competitor_analysis.extraction.trace import Inp, Trace, FORMULA_COL, INPUTS_COL
 
 log = logging_setup.get_logger(__name__)
 
@@ -72,6 +73,71 @@ _PRIOR_IDX = HEADERS.index(PRIOR_PERIOD)
 COL = {h: i + 1 for i, h in enumerate(HEADERS)}
 COL[CUR] = COL[CUR_PERIOD]
 COL[PRIOR] = COL[PRIOR_PERIOD]
+
+# Trace columns sit after Growth and are deliberately NOT in HEADERS/COL: they
+# are descriptive text, so row_dict() and every report reader ignore them.
+TRACE_HEADERS = {FORMULA_COL: "Formula", INPUTS_COL: "Inputs"}
+
+
+def write_trace(ws, row, trace, append=False):
+    """Writes a Trace into the Formula / Inputs cells of `row`. With
+    append=True the Inputs text is added to what is already there (used for
+    the PRIOR-from-last-year note) and the Formula cell is left alone."""
+    formula, inputs = trace.render() if isinstance(trace, Trace) else (None, trace)
+    if append:
+        c = ws.cell(row=row, column=INPUTS_COL)
+        c.value = f"{c.value} | {inputs}" if c.value else inputs
+        return
+    ws.cell(row=row, column=FORMULA_COL).value = formula
+    c = ws.cell(row=row, column=INPUTS_COL)
+    c.value = inputs
+    c.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
+
+
+def _inp(label, source, unit, cur, prior=None):
+    return (label, source, unit, cur, prior)
+
+
+# Components an extractor read on the way to a derived figure, keyed by
+# (pdf path, name). A side channel rather than a changed return value, because
+# the extractors' return shapes are consumed all over; each key is written by
+# the one thread parsing that PDF and popped by extract_income_statement.
+_NOTES = {}
+
+
+def _note(pdf_path, name, **parts):
+    _NOTES[(str(pdf_path), name)] = parts
+
+
+def _take_note(pdf_path, name):
+    return _NOTES.pop((str(pdf_path), name), None) or {}
+
+
+def raw_trace(form, desc, cur, prior=None, unit="Cr", note=None):
+    """Trace for a figure that is read straight off a filing / GIC cell (no
+    arithmetic beyond a unit conversion) - the Formula cell says 'Read:'."""
+    return make_trace(f"Read: {desc}", [_inp("Value", form, unit, cur, prior)], note,
+                      cur_only=prior is None)
+
+
+# What each directly-read Slide 18-21 line is read from, for the 'Read:' trace.
+S18_RAW_FORM = {"Net Written Premium": "NL-4", "Earned Premium": "NL-4", "Claims": "NL-1",
+                "PBT": "NL-2", "PAT": "NL-2"}
+SEGMENT_RAW_FORM = {"Net Written Premium": "NL-4", "Earned Premium": "NL-4", "Claims": "NL-5",
+                    "Net Commission": "NL-6", "Operating Expenses": "NL-7"}
+# Arithmetic the model (not Python) is asked to do while reading these keys.
+RAW_KEY_NOTES = {
+    "ri_ceded_total": "Model sums the Proportional + Non-Proportional + Facultative ceded sub-columns of NL-33 "
+                      "(the individual sub-columns are not captured)",
+    "solvency_ratio": "Rescaled /100 when the schedule prints a percentage (any value > 20)",
+}
+
+
+def make_trace(formula, inputs, note=None, cur_only=False):
+    """inputs: [(label, source, unit, cur, prior), ...] from _inp()."""
+    cur = [Inp(l, c, s_, u) for (l, s_, u, c, pr) in inputs]
+    prior = [] if cur_only else [Inp(l, pr, s_, u) for (l, s_, u, c, pr) in inputs]
+    return Trace(formula, cur, prior, note)
 
 
 @cfg.on_period_change
@@ -112,6 +178,12 @@ def sync_period_headers(ws):
         if cell.value != label:
             changed.append((cell.value, label))
             cell.value = label
+    for col, label in TRACE_HEADERS.items():
+        cell = ws.cell(row=1, column=col)
+        if cell.value != label:
+            cell.value = label
+    ws.column_dimensions[openpyxl.utils.get_column_letter(FORMULA_COL)].width = 48
+    ws.column_dimensions[openpyxl.utils.get_column_letter(INPUTS_COL)].width = 90
     return changed
 
 
@@ -159,6 +231,8 @@ def clear_period_values(ws):
             if ws.cell(row=r, column=COL[h]).value is not None:
                 ws.cell(row=r, column=COL[h]).value = None
                 cleared += 1
+        for col in TRACE_HEADERS:
+            ws.cell(row=r, column=col).value = None
     return cleared
 
 
@@ -366,13 +440,54 @@ def get(d, label, col, key):
         return None
 
 
+class _Lookups(dict):
+    """{(slide, company, metric1, metric2): (cur, prior)} plus `.traces`, the
+    matching {key: Trace} for the sheet's Formula / Inputs columns."""
+
+    def __init__(self):
+        super().__init__()
+        self.traces = {}
+
+
 def build_gic_lookups(gic: GicData):
     """Derive every figure needed for Slides 3-11 into a flat dict:
     lookups[(slide, company, metric1, metric2)] = (fy26_q3, fy25_q3)
     """
-    L = {}
+    L = _Lookups()
     seg = gic.segmentwise
     hp = gic.health
+
+    T = L.traces
+    SEG, HP = "GIC Segmentwise", "GIC Health Portfolio"
+
+    def gin(sheet, sheet_name, label, col, shown=None):
+        """Input pair for one GIC.xlsx cell (Rs. Crore)."""
+        return _inp(shown or f"{label} / {col}", sheet_name, "Cr", get(sheet, label, col, "cur"),
+                    get(sheet, label, col, "prev"))
+
+    def tr(key, formula, inputs, note=None):
+        T[key] = make_trace(formula, inputs, note)
+
+    def agg_trace(kind, sheet, sheet_name, col):
+        """(formula, inputs) for the SAHI / Pvt GI / Public GI aggregate of one GIC column."""
+        if kind == "SAHI":
+            return (f"Sum of '{col}' over the 7 SAHI insurers",
+                    [gin(sheet, sheet_name, lbl, col, short) for lbl, short in SAHI_ROW_LABELS.items()])
+        psu = [gin(sheet, sheet_name, lbl, col, lbl) for lbl in PSU_INSURERS]
+        if kind == "Pvt":
+            return (f"General Insurers Sub Total '{col}' - sum of '{col}' over the PSU insurers",
+                    [gin(sheet, sheet_name, "General Insurers Sub Total", col)] + psu)
+        return (f"Sum of '{col}' over the PSU insurers", psu)
+
+    def mix5_tr(retail, group, govt, travel, pa):
+        parts = {"Retail": retail, "Group": group, "Govt.": govt, "Travel": travel, "PA": pa}
+        tot = (sum((v[0] or 0) for v in parts.values()), sum((v[1] or 0) for v in parts.values()))
+        inputs = [_inp(n, "GIC", "Cr", v[0], v[1]) for n, v in parts.items()] + [_inp("5-bucket total", "derived", "Cr", *tot)]
+        return {n: make_trace(f"{n} / (Retail + Group + Govt + Travel + PA)", inputs,
+                              "Travel = Overseas Medical; PA from the Segmentwise sheet")
+                for n in parts}
+
+    PSU_NOTE = "PSU insurers: " + ", ".join(PSU_INSURERS)
 
     seg_cols = seg["col_names"]  # Fire, Marine Total, ..., Grand Total
     grand_total_cur = get(seg, "Industry Total", "Grand Total", "cur")
@@ -411,6 +526,16 @@ def build_gic_lookups(gic: GicData):
     L[(3, "Industry", "Market share", "Public")] = (abs2(public_cur), abs2(public_prev))
     L[(3, "Industry", "Market share", "SAHI")] = (abs2(sahi_sub_cur), abs2(sahi_sub_prev))
     L[(3, "Industry", "Market share", "Specialized Insurer")] = (abs2(spec_sub_cur), abs2(spec_sub_prev))
+    _s3 = (3, "Industry", "Market share")
+    tr(_s3 + ("Public",), "Sum of Grand Total GDPI over the PSU insurers",
+       [gin(seg, SEG, lbl, "Grand Total", lbl) for lbl in PSU_INSURERS], PSU_NOTE)
+    tr(_s3 + ("Private",), "General Insurers Sub Total - Public",
+       [gin(seg, SEG, "General Insurers Sub Total", "Grand Total"),
+        _inp("Public (PSU sum)", "derived", "Cr", public_cur, public_prev)])
+    tr(_s3 + ("SAHI",), "Stand-alone Health sub Total (Grand Total), as printed",
+       [gin(seg, SEG, "Stand-alone Health sub Total", "Grand Total")])
+    tr(_s3 + ("Specialized Insurer",), "Specialised sub Total (Grand Total), as printed",
+       [gin(seg, SEG, "Specialised sub Total", "Grand Total")])
 
     # Slide 3's per-segment rows are matched to the Segmentwise Report's own
     # header row by NORMALIZED name (case/whitespace/punctuation folded), so
@@ -438,6 +563,8 @@ def build_gic_lookups(gic: GicData):
         cur = get(seg, "Industry Total", actual, "cur")
         prev = get(seg, "Industry Total", actual, "prev")
         L[(3, "Industry", "Market share", metric2)] = (abs2(cur), abs2(prev))
+        tr((3, "Industry", "Market share", metric2), f"Industry Total - {actual}, as printed",
+           [gin(seg, SEG, "Industry Total", actual)])
 
     def sahi_pa_total(key):
         return sum(get(seg, lbl, "P.A.", key) or 0 for lbl in SAHI_ROW_LABELS)
@@ -487,6 +614,17 @@ def build_gic_lookups(gic: GicData):
         abs2(hp_public_cur + hp_public_pa_cur), abs2(hp_public_prev + hp_public_pa_prev))
     L[(4, "Health Industry (Inc. PA and Travel)", "Market share", "SAHI")] = (
         abs2(hp_sahi_cur + hp_sahi_pa_cur), abs2(hp_sahi_prev + hp_sahi_pa_prev))
+    _s4 = (4, "Health Industry (Inc. PA and Travel)", "Market share")
+    tr(_s4 + ("Private",), "(GI Sub Total health GDPI - PSU health GDPI) + Pvt GI P.A.",
+       [gin(hp, HP, "General Insurers Sub Total", "Grand Total"),
+        _inp("PSU health GDPI (sum)", "derived", "Cr", hp_public_cur, hp_public_prev),
+        _inp("Pvt GI P.A.", "derived", "Cr", hp_private_pa_cur, hp_private_pa_prev)], PSU_NOTE)
+    tr(_s4 + ("Public",), "PSU health GDPI + PSU P.A.",
+       [_inp("PSU health GDPI (sum)", "derived", "Cr", hp_public_cur, hp_public_prev),
+        _inp("PSU P.A. (sum)", "derived", "Cr", hp_public_pa_cur, hp_public_pa_prev)], PSU_NOTE)
+    tr(_s4 + ("SAHI",), "Stand-alone Health sub Total health GDPI + P.A. of the 7 SAHI insurers",
+       [gin(hp, HP, "Stand-alone Health sub Total", "Grand Total"),
+        _inp("SAHI P.A. (sum)", "derived", "Cr", hp_sahi_pa_cur, hp_sahi_pa_prev)])
 
     for metric2, hp_col in [("Health-Retail", "Health-Retail"), ("Health-Group", "Health-Group"),
                              ("Health-Government schemes", "Health-Government schemes"),
@@ -494,7 +632,10 @@ def build_gic_lookups(gic: GicData):
         cur = get(hp, "Industry Total", hp_col, "cur")
         prev = get(hp, "Industry Total", hp_col, "prev")
         L[(4, "Health Industry (Inc. PA and Travel)", "Market share", metric2)] = (abs2(cur), abs2(prev))
+        tr(_s4 + (metric2,), f"Health Portfolio Industry Total - {hp_col}, as printed",
+           [gin(hp, HP, "Industry Total", hp_col)])
     L[(4, "Health Industry (Inc. PA and Travel)", "Market share", "P.A.")] = (abs2(pa_gdpi_cur), abs2(pa_gdpi_prev))
+    tr(_s4 + ("P.A.",), "Segmentwise Industry Total P.A., as printed", [gin(seg, SEG, "Industry Total", "P.A.")])
 
     # ---- Slide 6/7/10/11: per-company & per-segment Health Portfolio mix ----
     # Slide 7: per-company Health-Retail/Group/Govt/Overseas (from hp) + P.A. (from seg)
@@ -505,9 +646,13 @@ def build_gic_lookups(gic: GicData):
             cur = get(hp, gic_label, hp_col, "cur")
             prev = get(hp, gic_label, hp_col, "prev")
             L[(7, gic_label, "Market share", metric2)] = (cur, prev)
+            T[(7, gic_label, "Market share", metric2)] = raw_trace(
+                HP, f"Health Portfolio '{hp_col}' for this insurer, as printed", cur, prev)
         pa_cur = get(seg, gic_label, "P.A.", "cur")
         pa_prev = get(seg, gic_label, "P.A.", "prev")
         L[(7, gic_label, "Market share", "P.A.")] = (pa_cur, pa_prev)
+        T[(7, gic_label, "Market share", "P.A.")] = raw_trace(
+            SEG, "Segmentwise Report 'P.A.' for this insurer, as printed", pa_cur, pa_prev)
 
     # Slide 6: SAHI / Pvt GI / Public GI totals by Health-Retail/Group/Govt/Overseas/PA
     def sahi_component_total(hp_col, key):
@@ -530,10 +675,15 @@ def build_gic_lookups(gic: GicData):
             cur = fn(hp_col, "cur")
             prev = fn(hp_col, "prev")
             L[(6, grp_name, "Market share", metric2)] = (cur, prev)
+            kind = {"SAHI Market": "SAHI", "Pvt GI": "Pvt", "Public GI": "Public"}[grp_name]
+            tr((6, grp_name, "Market share", metric2), *agg_trace(kind, hp, HP, hp_col),
+               note=PSU_NOTE if kind != "SAHI" else None)
 
     L[(6, "SAHI Market", "Market share", "P.A.")] = (sahi_pa_total("cur"), sahi_pa_total("prev"))
     L[(6, "Pvt GI", "Market share", "P.A.")] = (pvt_gi_pa_total("cur"), pvt_gi_pa_total("prev"))
     L[(6, "Public GI", "Market share", "P.A.")] = (public_gi_pa_total("cur"), public_gi_pa_total("prev"))
+    for _g, _k in (("SAHI Market", "SAHI"), ("Pvt GI", "Pvt"), ("Public GI", "Public")):
+        tr((6, _g, "Market share", "P.A."), *agg_trace(_k, seg, SEG, "P.A."), note=PSU_NOTE if _k != "SAHI" else None)
 
     # Both slides are "mix" (composition %) rows: each bucket's absolute
     # value as a fraction of that SAME group/company's own 5-bucket total
@@ -583,8 +733,24 @@ def build_gic_lookups(gic: GicData):
             "Travel": (fn("Overseas Medical", "cur"), fn("Overseas Medical", "prev")),
             "PA": (pa_fn("cur"), pa_fn("prev")),
         }
+        _s10_col = {"Retail": "Health-Retail", "Group": "Health-Group", "Govt.": "Health-Government schemes",
+                    "Travel": "Overseas Medical", "PA": "P.A."}
         if grp_name == "SAHI":
+            _mt = mix5_tr(buckets["Retail"], buckets["Group"], buckets["Govt."], buckets["Travel"], buckets["PA"])
+            for m2, t in _mt.items():
+                T[(10, "Segment-wise GDPI mix", grp_name, m2)] = t
             buckets = mix5(buckets["Retail"], buckets["Group"], buckets["Govt."], buckets["Travel"], buckets["PA"])
+        elif grp_name in ("Pvt. GI", "Public GI"):
+            for m2, col in _s10_col.items():
+                six = T.get((6, "Pvt GI" if grp_name == "Pvt. GI" else "Public GI", "Market share", col))
+                if six is not None:
+                    T[(10, "Segment-wise GDPI mix", grp_name, m2)] = Trace(
+                        "= Slide 6 aggregate (absolute Rs. Cr, not a mix %)", six.cur, six.prior, six.note)
+        else:
+            for m2, col in _s10_col.items():
+                sheet, name = (seg, SEG) if col == "P.A." else (hp, HP)
+                tr((10, "Segment-wise GDPI mix", grp_name, m2), f"Industry Total - {col}, as printed",
+                   [gin(sheet, name, "Industry Total", "P.A." if col == "P.A." else col)])
         for metric2, val in buckets.items():
             L[(10, "Segment-wise GDPI mix", grp_name, metric2)] = val
 
@@ -596,13 +762,16 @@ def build_gic_lookups(gic: GicData):
         "Narayana": "Narayana Health Insurance Ltd",
     }
     for short, gic_label in company_name_map.items():
-        mix = mix5(
+        _parts = (
             (get(hp, gic_label, "Health-Retail", "cur"), get(hp, gic_label, "Health-Retail", "prev")),
             (get(hp, gic_label, "Health-Group", "cur"), get(hp, gic_label, "Health-Group", "prev")),
             (get(hp, gic_label, "Health-Government schemes", "cur"), get(hp, gic_label, "Health-Government schemes", "prev")),
             (get(hp, gic_label, "Overseas Medical", "cur"), get(hp, gic_label, "Overseas Medical", "prev")),
             (get(seg, gic_label, "P.A.", "cur"), get(seg, gic_label, "P.A.", "prev")),
         )
+        mix = mix5(*_parts)
+        for m2, t in mix5_tr(*_parts).items():
+            T[(11, "Segment-wise GDPI mix - SAHI", short, m2)] = t
         for metric2, val in mix.items():
             L[(11, "Segment-wise GDPI mix - SAHI", short, metric2)] = val
     sahi_mix = mix5(
@@ -612,6 +781,15 @@ def build_gic_lookups(gic: GicData):
         (sahi_component_total("Overseas Medical", "cur"), sahi_component_total("Overseas Medical", "prev")),
         (sahi_pa_total("cur"), sahi_pa_total("prev")),
     )
+    _sahi_parts = (
+        (sahi_component_total("Health-Retail", "cur"), sahi_component_total("Health-Retail", "prev")),
+        (sahi_component_total("Health-Group", "cur"), sahi_component_total("Health-Group", "prev")),
+        (sahi_component_total("Health-Government schemes", "cur"), sahi_component_total("Health-Government schemes", "prev")),
+        (sahi_component_total("Overseas Medical", "cur"), sahi_component_total("Overseas Medical", "prev")),
+        (sahi_pa_total("cur"), sahi_pa_total("prev")),
+    )
+    for m2, t in mix5_tr(*_sahi_parts).items():
+        T[(11, "Segment-wise GDPI mix - SAHI", "SAHI", m2)] = t
     for metric2, val in sahi_mix.items():
         L[(11, "Segment-wise GDPI mix - SAHI", "SAHI", metric2)] = val
 
@@ -652,13 +830,25 @@ def build_gic_lookups(gic: GicData):
             round_half_up(cur, 2) if cur is not None else None,
             round_half_up(prev, 2) if prev is not None else None,
         )
+        _hp_in = gin(hp, HP, gic_label, "Grand Total", "Health Grand Total")
+        _pa_in = gin(seg, SEG, gic_label, "P.A.", "P.A.")
+        tr((5, "SAHI Market", "Market share", slide5_metric2[gic_label]),
+           "Health Portfolio Grand Total + Segmentwise P.A.", [_hp_in, _pa_in])
         g = growth(cur, prev)
         L[(9, slide9_company[gic_label], "SAHI Growth", "GDPI Growth SAHI")] = (
             round_half_up(g, 4) if g is not None else None, None,
         )
+        tr((9, slide9_company[gic_label], "SAHI Growth", "GDPI Growth SAHI"),
+           "(Health + PA GDPI CUR - PRIOR) / PRIOR",
+           [_hp_in, _pa_in, _inp("Health + PA GDPI", "derived", "Cr", cur, prev)],
+           "The value is a growth rate, so this row's PRIOR column is blank")
     sahi_g = growth(sahi_total_cur, sahi_total_prev)
     L[(9, "SAHI", "SAHI Growth", "GDPI Growth SAHI")] = (round_half_up(sahi_g, 4) if sahi_g is not None else None, None)
     L[(9, "SAHI", "GDPI Growth SAHI", "SAHI CAGR")] = (round_half_up(sahi_g, 4) if sahi_g is not None else None, None)
+    for _m1, _m2 in (("SAHI Growth", "GDPI Growth SAHI"), ("GDPI Growth SAHI", "SAHI CAGR")):
+        tr((9, "SAHI", _m1, _m2), "(Sum of the 7 SAHI insurers' Health + PA GDPI, CUR - PRIOR) / PRIOR",
+           [_inp("SAHI Health + PA GDPI (sum)", "derived", "Cr", sahi_total_cur, sahi_total_prev)],
+           "Single YoY growth, not a multi-year CAGR; the value is a growth rate so PRIOR is blank")
     # NOTE: rows 93-99 (Metric1="CAGR", Metric2="SAHI CAGR") ask for a true
     # multi-year CAGR, which is not derivable from a single YoY snapshot -
     # intentionally left unmapped/blank rather than guessed.
@@ -676,6 +866,13 @@ def build_gic_lookups(gic: GicData):
     # than leaving it blank.
     L[(8, "Industry Total", "Growth %", "")] = (round_half_up(industry_g, 4) if industry_g is not None else None, 0)
     L[(8, "Stand-alone Health sub Total", "Growth %", "")] = (round_half_up(sahi_health_g, 4) if sahi_health_g is not None else None, 0)
+    tr((8, "Industry Total", "Growth %", ""), "(Health incl. PA GDPI CUR - PRIOR) / PRIOR",
+       [gin(hp, HP, "Industry Total", "Grand Total", "Health Grand Total"),
+        _inp("Industry P.A.", "GIC Segmentwise", "Cr", pa_gdpi_cur, pa_gdpi_prev),
+        _inp("Health incl. PA", "derived", "Cr", health_incl_pa_cur, health_incl_pa_prev)],
+       "Industry here means the Health industry; PRIOR slot is a literal 0 by convention")
+    tr((8, "Stand-alone Health sub Total", "Growth %", ""), "(SAHI sub Total GDPI CUR - PRIOR) / PRIOR",
+       [gin(seg, SEG, "Stand-alone Health sub Total", "Grand Total")], "PRIOR slot is a literal 0 by convention")
 
     # ---- Slide 14: Retail Revenue / Retail Accretion (GIC-sourced, per company) ----
     slide14_company = {
@@ -691,8 +888,12 @@ def build_gic_lookups(gic: GicData):
         cur = get(hp, gic_label, "Health-Retail", "cur")
         prev = get(hp, gic_label, "Health-Retail", "prev")
         L[(14, short, "Retail Revenue", "")] = (cur, prev)
+        T[(14, short, "Retail Revenue", "")] = raw_trace(
+            HP, "Health Portfolio 'Health-Retail' for this insurer, as printed", cur, prev)
         if cur is not None and prev is not None:
             L[(14, short, "Retail Accretion", "Retail Revenue CY-Retail Revenue PY")] = (round_half_up(cur - prev, 2), None)
+            tr((14, short, "Retail Accretion", "Retail Revenue CY-Retail Revenue PY"),
+               "Retail Revenue CY - Retail Revenue PY", [gin(hp, HP, gic_label, "Health-Retail", "Retail Revenue")])
 
     return L
 
@@ -725,6 +926,9 @@ def apply_gic_rows(ws, lookups, dry_run=False, force=False):
             g = growth(cur, prev)
             if g is not None:
                 ws.cell(row=r, column=COL["Growth"]).value = g
+            tr = getattr(lookups, "traces", {}).get(key)
+            if tr is not None:
+                write_trace(ws, r, tr)
         updated += 1
     return updated, skipped
 
@@ -781,7 +985,7 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
     log = []
     gdpi_lookup = gic_gdpi_lookup(gic)
 
-    def write_cell(row, cur, prior):
+    def write_cell(row, cur, prior, trace=None):
         nonlocal written
         if cur is None and prior is None:
             return
@@ -793,6 +997,8 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
             g = growth(cur, prior)
             if g is not None:
                 ws.cell(row=row, column=COL["Growth"]).value = g
+            if trace is not None:
+                write_trace(ws, row, trace)
         written += 1
 
     for company in SLIDE8_COMPANY:
@@ -803,8 +1009,10 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
         # a 0/None GIC figure falls back to the company's NL-4 GDPI, which is
         # also written to its own "GDPI (NL-4)" row for audit.
         nl4_cur, nl4_prior = apply_income_statement_rows._cache.get(company, {}).get("NL-4 GDPI", (None, None))
-        written += apply_metric_to_rows(ws, idx, 8, SLIDE8_COMPANY[company], SLIDE8_NL4_METRIC1, None,
-                                        nl4_cur, nl4_prior, dry_run, log)
+        gic_cur_raw, gic_prior_raw = gt_cur, gt_prior
+        written += apply_metric_to_rows(
+            ws, idx, 8, SLIDE8_COMPANY[company], SLIDE8_NL4_METRIC1, None, nl4_cur, nl4_prior, dry_run, log,
+            trace=raw_trace("NL-4", "NL-4 'Gross Direct Premium' as printed / 100 [Lakhs -> Cr]", nl4_cur, nl4_prior))
         if not gt_cur and nl4_cur:
             log.append((8, company, "Revenue Growth (GDPI)", "current", f"GIC {gt_cur} -> NL-4 {nl4_cur}"))
             gt_cur = nl4_cur
@@ -816,6 +1024,12 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
                 ws, idx, 8, SLIDE8_COMPANY[company], "Revenue Growth (GDPI)",
                 SLIDE8_METRIC2.get(company), gt_cur, gt_prior,
                 dry_run, log,
+                trace=make_trace(
+                    "GIC Segmentwise Grand Total for the company (NL-4 GDPI when GIC is 0/blank)",
+                    [_inp("GDPI per GIC", "GIC Segmentwise", "Cr", gic_cur_raw, gic_prior_raw),
+                     _inp("GDPI per NL-4", "NL-4", "Cr", nl4_cur, nl4_prior),
+                     _inp("GDPI used", "derived", "Cr", gt_cur, gt_prior)],
+                    "GIC is authoritative; a 0/blank GIC figure falls back to the filing's own NL-4 GDPI"),
             )
 
         nl36 = nl36_for(company)
@@ -850,7 +1064,16 @@ def fix_slide8_and_slide12(ws, gic=None, dry_run=False):
                         if isinstance(cur_lakhs, (int, float)) and total_cur else None)
             frac_prior = (round_half_up(prior_lakhs / total_prior, 4)
                           if isinstance(prior_lakhs, (int, float)) and total_prior else None)
-            write_cell(row, frac_cur, frac_prior)
+            if metric2 == "Others":
+                formula = "(Total (A) - sum of the five named channels) / Total (A)"
+                inputs = [_inp(f"Premium - {m2}", "NL-36", "L", v[0], v[1]) for m2, v in nl36["channels"].items()]
+                inputs.append(_inp("Others (residual)", "NL-36", "L", cur_lakhs, prior_lakhs))
+            else:
+                formula = f"Channel premium - {metric2} / Total (A)"
+                inputs = [_inp(f"Premium - {metric2}", "NL-36", "L", cur_lakhs, prior_lakhs)]
+            inputs.append(_inp("NL-36 Total (A)", "NL-36", "L", total_cur, total_prior))
+            write_cell(row, frac_cur, frac_prior, trace=make_trace(
+                formula, inputs, "Share of Total (A) so the six channels sum to 1.0"))
 
     return written, log
 
@@ -1219,11 +1442,112 @@ def extract_income_statement(company_short, pdf_path):
     out["NL-36 Total Policies"] = extract_nl36_policies(pdf_path)
     out["CSR Amount"] = (extract_nl37_amount_csr(pdf_path), None)
     out["NL-45 Complaint Ratios"] = extract_nl45_complaint_ratios(pdf_path)  # (policy, claim), not (cur, prior)
-    out["IT Capex"] = (lakhs_to_cr(extract_it_capex(pdf_path)), None)
+    it_capex_lakhs = extract_it_capex(pdf_path)
+    out["IT Capex"] = (lakhs_to_cr(it_capex_lakhs), None)
     out["Office Counts"] = extract_office_counts(pdf_path)  # (opening, closing), not (cur, prior)
     out["Cumulative Capital"] = extract_cumulative_capital(pdf_path)
 
+    out["_traces"] = _income_statement_traces(
+        pdf_path, gic_cur_cr, gic_prior_cr, gdp, gdp_final, ri_accepted,
+        commission, opex, nl2_total_b, nl2_contribution, nl2_other_income,
+        ph_interest, ph_profit_sale, sh_interest, sh_profit_sale, sh_loss_sale, sh_amort,
+        gross_commission, it_capex_lakhs)
     return out
+
+
+def _lp(label, source, vals):
+    """Input pair for a figure read in Rs. Lakhs (cur, prior)."""
+    return _inp(label, source, "L", vals[0], vals[1])
+
+
+def _income_statement_traces(pdf_path, gic_cur_cr, gic_prior_cr, gdp, gdp_final, ri_accepted,
+                             commission, opex, nl2_total_b, nl2_contribution, nl2_other_income,
+                             ph_interest, ph_profit_sale, sh_interest, sh_profit_sale, sh_loss_sale, sh_amort,
+                             gross_commission, it_capex_lakhs):
+    """Formula/inputs behind every Slide 18 figure that is computed rather than
+    read off one cell, plus the other extractors' derived figures. Inputs are
+    shown as the filing prints them (Rs. Lakhs) - the /100 is in the formula."""
+    T = {}
+    T["Gross Written Premium"] = make_trace(
+        "(GDPI + Premium on reinsurance accepted) / 100  [Lakhs -> Cr]",
+        [_inp("GDPI used", "GIC / NL-4", "L", gdp_final[0], gdp_final[1]),
+         _inp("GDPI per GIC.xlsx", "GIC", "Cr", gic_cur_cr, gic_prior_cr),
+         _lp("GDPI per NL-4", "NL-4", gdp),
+         _lp("Premium on RI accepted", "NL-4", ri_accepted)],
+        "CUR GDPI = GIC Grand Total x 100 when GIC is available, else NL-4; PRIOR GDPI = NL-4 prior, else GIC. "
+        "A missing RI-accepted figure counts as 0")
+    T["Total Overheads"] = make_trace(
+        "(Commission + Operating Expenses + (NL-2 TOTAL(B) - Contribution to Policyholders) - NL-2 Other Income) / 100",
+        [_lp("Commission (NL-1)", "NL-1", commission),
+         _lp("Operating Expenses (NL-1)", "NL-1", opex),
+         _lp("NL-2 TOTAL (B)", "NL-2", nl2_total_b),
+         _lp("Contribution to Policyholders", "NL-2", nl2_contribution),
+         _lp("NL-2 Other Income", "NL-2", nl2_other_income)],
+        "Any NL-2 term that can't be found counts as 0; commission or opex missing blanks the total")
+    T["Investment Income"] = make_trace(
+        "(PH interest + PH profit on sale + SH interest + SH profit on sale + SH loss on sale + SH amortisation) / 100",
+        [_lp("PH Interest, Dividend & Rent", "NL-1", ph_interest),
+         _lp("PH profit on sale of investments", "NL-1", ph_profit_sale),
+         _lp("SH Interest, Dividend & Rent", "NL-2", sh_interest),
+         _lp("SH profit on sale of investments", "NL-2", sh_profit_sale),
+         _lp("SH loss on sale of investments", "NL-2", sh_loss_sale),
+         _lp("SH amortisation of premium", "NL-2", sh_amort)],
+        "Components that can't be found are skipped; blank only when none are found")
+    T["Gross Commission"] = make_trace(
+        "Gross Commission as printed (or sum of Commission & Remuneration + Rewards + Distribution fees) / 100",
+        [_lp("Gross Commission", "NL-6", gross_commission)])
+    T["IT Capex"] = make_trace(
+        "Sum of NL-14 Additions over IT hardware and IT intangible rows / 100",
+        [_inp("IT additions", "NL-14", "L", it_capex_lakhs, None)],
+        "Current period only; excludes goodwill, work-in-progress and total rows", cur_only=True)
+
+    n = _take_note(pdf_path, "Investment Yield")
+    if n:
+        def _yi(which):
+            pct, inv, inc, how = n.get(which, (None, None, None, ""))
+            items = [Inp("Printed Gross Yield %", pct, "NL-31", "%"),
+                     Inp("Investment", inv, "NL-31", "L"), Inp("Income", inc, "NL-31", "L")]
+            return [i for i in items if i.value is not None] or [Inp("Printed Gross Yield %", None, "NL-31", "%")], how
+        cur_i, cur_how = _yi("cur")
+        prior_i, prior_how = _yi("prior")
+        T["Investment Yield"] = Trace(
+            "NL-31 TOTAL row Gross Yield % / 100  (fallback: Income / Investment)", cur_i, prior_i,
+            f"CUR: {cur_how or 'n/a'}; PRIOR: {prior_how or 'n/a'}. Year-to-date, not annualised")
+    n = _take_note(pdf_path, "Investment Portfolio")
+    for bucket in INVESTMENT_PORTFOLIO_BUCKETS:
+        codes = ", ".join(c for c, b in CATEGORY_CODE_TO_BUCKET.items() if b == bucket)
+        T[f"Portfolio:{bucket}"] = make_trace(
+            f"Sum of NL-31 Investment (book value) over every Category Code mapped to '{bucket}' / 100  [Lakhs -> Cr]",
+            [_inp(f"{bucket} (sum of codes)", "NL-31", "L", (n.get("cur") or {}).get(bucket),
+                  (n.get("prior") or {}).get(bucket))],
+            f"Codes: {codes}. Unmapped codes are excluded and logged")
+    n = _take_note(pdf_path, "Average Claim Size")
+    if n:
+        T["Average Claim Size"] = make_trace(
+            "Total amount of claims paid x 1e5 / Total no. of claims paid  [Lakhs -> Rs.]",
+            [_inp("Total amount of claims paid", "NL-39", "L", n["amount"], None),
+             _inp("Total no. of claims paid", "NL-39", "count", n["count"], None)],
+            f"Summed over every line of business; YTD block = the one with the most claims (of {n['blocks']} block(s))",
+            cur_only=True)
+    n = _take_note(pdf_path, "CSR Amount")
+    if n:
+        T["CSR Amount"] = make_trace(
+            "Settled / (O/S at beginning + Reported - O/S at end)",
+            [_inp("Claims settled (amount)", "NL-37", "L", n["settled"], None),
+             _inp("O/S at beginning", "NL-37", "L", n["os_start"], None),
+             _inp("Reported during period", "NL-37", "L", n["reported"], None),
+             _inp("O/S at end", "NL-37", "L", n["os_end"], None),
+             _inp("Denominator", "derived", "L", n["denom"], None)],
+            "NL-37 amount block, Total column; year to date", cur_only=True)
+    n = _take_note(pdf_path, "Cumulative Capital")
+    if n:
+        sc, sam, sp = n["sc"], n["sam"], n["sp"]
+        T["Cumulative Capital"] = make_trace(
+            "(Share Capital + Share Application Money pending allotment + Share Premium) / 100  [Lakhs -> Cr]",
+            [_lp("Share Capital", "NL-3", sc), _lp("Share Application Money", "NL-3", sam),
+             _lp("Share Premium (period-end)", "NL-10", sp)],
+            "Share Capital is required; the other two count as 0 if not found")
+    return T
 
 
 # A well-formed figure as these forms print it: Indian ("1,19,190") or plain
@@ -1321,25 +1645,33 @@ def extract_investment_yield(pdf_path):
             # label blank - it's still reliably the table's last row.
             total_row = table[-1]
 
-        def yield_at(block_start):
+        yield_parts = {}
+
+        def yield_at(block_start, which):
             if block_start is None:
                 return None
             # Preferred: the row's own precomputed Gross Yield sub-column.
             pct = _nl31_cell_num(total_row, block_start + 2)
             if pct is not None:
+                yield_parts[which] = (pct, None, None, "printed Gross Yield %")
                 return pct / 100
             # Fallback (e.g. Star Health leaves this row's yield % blank):
             # derive it from the same row's Investment/Income sub-columns.
             income = _nl31_cell_num(total_row, block_start + 1)
             investment = _nl31_cell_num(total_row, block_start)
+            yield_parts[which] = (None, investment, income, "Income / Investment (printed yield blank)")
             return round_half_up(income / investment, 4) if income is not None and investment else None
 
-        return yield_at(cur_start), yield_at(prior_start)
+        res = yield_at(cur_start, "cur"), yield_at(prior_start, "prior")
+        _note(pdf_path, "Investment Yield", **yield_parts)
+        return res
 
     text, _ = get_form_text(pdf_path, r"FORM\s+NL-31")
     if not text:
         return None, None
     cur, prior = get_line_item_from_text(text, "TOTAL", cur_col=6, prior_col=10)
+    _note(pdf_path, "Investment Yield", cur=(cur, None, None, "printed Gross Yield % (text TOTAL row)"),
+          prior=(prior, None, None, "printed Gross Yield % (text TOTAL row)"))
     return (round_half_up(cur / 100, 4) if cur is not None else None,
             round_half_up(prior / 100, 4) if prior is not None else None)
 
@@ -1453,6 +1785,7 @@ def extract_investment_portfolio(pdf_path):
             if printed and abs(summed - printed) > 0.005 * printed:
                 RESOLUTION_LOG.append(f"NL-31 {label} buckets sum to {summed:,.0f} lakh but the form's TOTAL "
                                       f"is {printed:,.0f} - Slide 28 may be incomplete ({pdf_path})")
+    _note(pdf_path, "Investment Portfolio", cur=dict(cur_by_bucket), prior=dict(prior_by_bucket))
     return {b: (lakhs_to_cr(cur_by_bucket.get(b)), lakhs_to_cr(prior_by_bucket.get(b)))
             for b in INVESTMENT_PORTFOLIO_BUCKETS if b in cur_by_bucket or b in prior_by_bucket}
 
@@ -1517,6 +1850,7 @@ def extract_average_claim_size(pdf_path):
     if not blocks:
         return None, None
     count, amount_lakhs = max(blocks, key=lambda b: b[0])
+    _note(pdf_path, "Average Claim Size", count=count, amount=amount_lakhs, blocks=len(blocks))
     return round_half_up(amount_lakhs * 1e5 / count, 2), None
 
 
@@ -1791,6 +2125,7 @@ def extract_nl37_amount_csr(pdf_path):
     if settled is None or os_start is None or reported is None:
         return None
     denom = os_start + reported - (os_end or 0)
+    _note(pdf_path, "CSR Amount", settled=settled, os_start=os_start, reported=reported, os_end=os_end, denom=denom)
     return round_half_up(settled / denom, 4) if denom else None
 
 
@@ -1975,6 +2310,8 @@ def extract_cumulative_capital(pdf_path):
 
     cum_cur = combine(share_capital[0], share_app_money[0], share_premium_cur)
     cum_prior = combine(share_capital[1], share_app_money[1], share_premium_prior)
+    _note(pdf_path, "Cumulative Capital", sc=share_capital, sam=share_app_money,
+          sp=(share_premium_cur, share_premium_prior))
     return lakhs_to_cr(cum_cur), lakhs_to_cr(cum_prior)
 
 
@@ -2011,6 +2348,12 @@ def apply_income_statement_rows(ws, dry_run=False):
             g = growth(cur, prev)
             if g is not None:
                 ws.cell(row=r, column=COL["Growth"]).value = g
+            tr = cache[company].get("_traces", {}).get(metric1)
+            if tr is None and metric1 in S18_RAW_FORM:
+                tr = raw_trace(S18_RAW_FORM[metric1], f"{S18_RAW_FORM[metric1]} line '{metric1}' as printed / 100 "
+                               "[Lakhs -> Cr]", cur, prev)
+            if tr is not None:
+                write_trace(ws, r, tr)
         updated += 1
     return updated, skipped
 
@@ -2104,6 +2447,7 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
         if c is None or g is None or n is None:
             return c
         return -c if abs(g + c - n) < abs(g - c - n) else c
+    ri_comm_ceded_printed = ri_comm_ceded
     ri_comm_ceded = tuple(_ceded_as_deduction(gross_comm_full[k], ri_comm_ceded[k], net_comm[k]) for k in (0, 1))
     ri_comm_signed = _neg(ri_comm_ceded)
 
@@ -2135,6 +2479,43 @@ def extract_segment_income_statement(company_short, pdf_path, segment):
     out["Loss Ratio"] = (cur[1], prior[1])
     out["Expense Ratio"] = (cur[2], prior[2])
     out["Combined Ratio"] = (cur[3], prior[3])
+
+    def _cr(label, source, key):
+        return _inp(label, source, "ratio" if key.endswith("Ratio") else "Cr", out[key][0], out[key][1])
+
+    seg = f"{segment} segment"
+    T = {}
+    T["Gross Written Premium"] = make_trace(
+        "(Gross Direct Premium + Premium on reinsurance accepted) / 100  [Lakhs -> Cr]",
+        [_lp("Gross Direct Premium", "NL-4", gdp), _lp("Premium on RI accepted", "NL-4", ri_prem_accepted)],
+        f"{seg}; a missing RI-accepted figure counts as 0")
+    T["Gross Commission"] = make_trace(
+        "(Gross Commission (or sum of its components) + Commission on RI accepted) / 100  [Lakhs -> Cr]",
+        [_lp("Gross Commission (NL-6)", "NL-6", gross_comm), _lp("Commission on RI accepted", "NL-6", ri_comm_accepted)],
+        seg)
+    T["RI Commission"] = make_trace(
+        "-(Commission on RI ceded, sign set so Gross + Ceded reproduces printed Net Commission) / 100",
+        [_lp("Gross Commission incl. RI accepted", "NL-6", gross_comm_full),
+         _lp("Commission on RI ceded (as printed)", "NL-6", ri_comm_ceded_printed),
+         _lp("Printed Net Commission", "NL-6", net_comm)],
+        f"{seg}; brackets mean a deduction for some filers and a reversal for others, so the sign is chosen by "
+        "whichever reproduces the printed Net Commission")
+    T["UW Profit/(Loss)"] = make_trace(
+        "Earned Premium - Claims - Net Commission - Operating Expenses",
+        [_cr("Earned Premium", "NL-4", "Earned Premium"), _cr("Claims", "NL-5", "Claims"),
+         _cr("Net Commission", "NL-6", "Net Commission"), _cr("Operating Expenses", "NL-7", "Operating Expenses")],
+        f"{seg}; computed from the figures already rounded to Cr")
+    T["Loss Ratio"] = make_trace(
+        "Claims / Earned Premium",
+        [_cr("Claims", "NL-5", "Claims"), _cr("Earned Premium", "NL-4", "Earned Premium")], seg)
+    T["Expense Ratio"] = make_trace(
+        "(Net Commission + Operating Expenses) / Net Written Premium",
+        [_cr("Net Commission", "NL-6", "Net Commission"), _cr("Operating Expenses", "NL-7", "Operating Expenses"),
+         _cr("Net Written Premium", "NL-4", "Net Written Premium")], seg)
+    T["Combined Ratio"] = make_trace(
+        "Loss Ratio + Expense Ratio",
+        [_cr("Loss Ratio", "derived", "Loss Ratio"), _cr("Expense Ratio", "derived", "Expense Ratio")], seg)
+    out["_traces"] = T
     return out
 
 
@@ -2176,6 +2557,12 @@ def apply_segment_income_statement_rows(ws, slide_no, segment, dry_run=False):
             g = growth(cur, prev)
             if g is not None:
                 ws.cell(row=r, column=COL["Growth"]).value = g
+            tr = cache[cache_key].get("_traces", {}).get(metric1)
+            if tr is None and metric1 in SEGMENT_RAW_FORM:
+                tr = raw_trace(SEGMENT_RAW_FORM[metric1], f"{SEGMENT_RAW_FORM[metric1]} {segment} segment "
+                               f"'{metric1}' as printed / 100 [Lakhs -> Cr]", cur, prev)
+            if tr is not None:
+                write_trace(ws, r, tr)
         updated += 1
     return updated, skipped
 
@@ -2243,7 +2630,7 @@ def build_row_index(ws):
     return idx
 
 
-def apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, log):
+def apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, log, trace=None):
     if cur is None and prior is None:
         return 0
     key = (slide, normalize_text(company), normalize_text(metric1))
@@ -2267,6 +2654,8 @@ def apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, 
             g = growth(cur, prior)
             if g is not None:
                 ws.cell(row=row, column=COL["Growth"]).value = g
+            if trace is not None:
+                write_trace(ws, row, trace)
         written += 1
     return written
 
@@ -2339,6 +2728,8 @@ def backfill_prior_from_last_year(ws, dry_run=False, facts=None, extract=True):
                     g = growth(d[CUR], value)
                     if g is not None:
                         ws.cell(row=row, column=COL["Growth"]).value = g
+                    write_trace(ws, row, "PRIOR: last-year fact (from last year's own filing / prior_facts)",
+                                append=True)
                 written += 1
                 applied.append((slide, company, metric1, metric2))
     return written, applied
@@ -2357,7 +2748,7 @@ def _converted_value(regrouped, kind_by_key, key):
 _LOOKUP = object()  # sentinel: caller did not supply an opening headcount
 
 
-def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onroll=_LOOKUP):
+def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onroll=_LOOKUP, traces=None):
     """regrouped: {form_tag: schemas.FORM_SCHEMAS[form_tag] instance} from
     schemas.regroup_by_form() - one validated Pydantic object per in-scope
     NL-form. kind_by_key: {gemini_key: kind}, from master_metric_specs() -
@@ -2370,8 +2761,25 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     get()'s own body changed (dict lookup -> typed attribute read); every
     call site downstream still just calls get(key) and gets back the same
     (cur, prior) tuple in the same units as before.
+
+    `traces`, if given, is filled with {(slide, metric1, metric2): Trace} - the
+    formula and input values behind each derived cell, for the sheet's Formula /
+    Inputs columns. It never affects the returned values.
     """
     D = {}
+    T = traces if traces is not None else {}
+    ext = income.get("_traces", {})  # traces from the extractors, keyed by sheet metric1
+
+    def put(key, formula, inputs, note=None, cur_only=False):
+        T[key] = make_trace(formula, inputs, note, cur_only)
+
+    def passthrough(key, ext_key, label, source, unit, vals):
+        """A value the extractor already computed - reuse its own trace if it has one."""
+        t = ext.get(ext_key)
+        if t is not None:
+            T[key] = t
+        else:
+            put(key, f"{label} as extracted", [_inp(label, source, unit, vals[0], vals[1])])
 
     def get(key):
         return _converted_value(regrouped, kind_by_key, key)
@@ -2431,6 +2839,27 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     eom_ratio_cur = safe_div(eom_num_cur, gwp_cur)
     eom_ratio_prior = safe_div(eom_num_prior, gwp_prior)
 
+    _exp_in = [_inp("Net Commission", "NL-6", "Cr", net_commission_cur, net_commission_prior),
+               _inp("Operating Expenses", "NL-7", "Cr", opex_alone_cur, opex_alone_prior),
+               _inp("Net Written Premium", "NL-4", "Cr", nwp_cur, nwp_prior)]
+    _loss_in = [_inp("Net Incurred Claims", "NL-1", "Cr", net_incurred_claims_cur, net_incurred_claims_prior),
+                _inp("Net Earned Premium", "NL-4", "Cr", ep_cur, ep_prior)]
+    _comb_in = [_inp("Expense Ratio", "derived", "ratio", expense_ratio_cur, expense_ratio_prior),
+                _inp("Loss Ratio", "derived", "ratio", loss_ratio_cur, loss_ratio_prior)]
+    _eom_in = [_inp("Gross Commission", "NL-6", "Cr", gross_commission_cur, gross_commission_prior),
+               _inp("Commission on RI Accepted", "NL-6", "Cr", ri_accepted_commission_cur, ri_accepted_commission_prior),
+               _inp("Operating Expenses", "NL-7", "Cr", opex_alone_cur, opex_alone_prior),
+               _inp("GST", "NL-7", "Cr", gst_cur, gst_prior),
+               _inp("CEO Remuneration", "NL-2", "Cr", ceo_remuneration_cur, ceo_remuneration_prior),
+               _inp("Gross Written Premium", "NL-4", "Cr", gwp_cur, gwp_prior)]
+    put((22, "Expense Ratio", None), "(Net Commission + Operating Expenses) / Net Written Premium", _exp_in)
+    T[(33, "Expense Ratio", None)] = T[(22, "Expense Ratio", None)]
+    put((22, "Loss Ratio", None), "Net Incurred Claims / Net Earned Premium", _loss_in)
+    T[(32, "Loss Ratio", None)] = T[(22, "Loss Ratio", None)]
+    put((22, "Combined Ratio", None), "Expense Ratio + Loss Ratio", _comb_in)
+    T[(32, "Combined Ratio", None)] = T[(22, "Combined Ratio", None)]
+    put((33, "Expense of Management Ratio", None),
+        "(Gross Commission + Commission on RI Accepted + Opex - GST - CEO Remuneration) / GWP", _eom_in)
     D[(22, "Expense Ratio", None)] = (expense_ratio_cur, expense_ratio_prior)
     D[(22, "Loss Ratio", None)] = (loss_ratio_cur, loss_ratio_prior)
     D[(22, "Combined Ratio", None)] = (combined_ratio_cur, combined_ratio_prior)
@@ -2441,6 +2870,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
 
     # Slide 24: expense ratios to GWP
     manpower_cur, manpower_prior = get("manpower_cost")
+    manpower_raw_cur, manpower_raw_prior = manpower_cur, manpower_prior
     # Manpower cost net of half the in-house claim processing cost (NL-7,
     # where a filer reports one) - that share of staff cost is claims
     # handling, not operating overhead. Feeds every manpower row (Slides
@@ -2457,6 +2887,17 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     D[(24, "Opex. To GWP ratio", None)] = (safe_div(opex_alone_cur, gwp_cur), safe_div(opex_alone_prior, gwp_prior))
     D[(24, "Manpower to GWP ratio", None)] = (safe_div(manpower_cur, gwp_cur), safe_div(manpower_prior, gwp_prior))
     D[(24, "IT spend to GWP ratio", None)] = (safe_div(it_cur, gwp_cur), None)
+    _gwp_in = _inp("Gross Written Premium", "NL-4", "Cr", gwp_cur, gwp_prior)
+    _manp_in = [_inp("Manpower cost (NL-7, raw)", "NL-7", "Cr", manpower_raw_cur, manpower_raw_prior),
+                _inp("In-house claims processing cost", "NL-7", "Cr", in_house_cur, in_house_prior),
+                _inp("Manpower used", "derived", "Cr", manpower_cur, manpower_prior)]
+    _manp_note = "Manpower used = raw - 0.5 x in-house claims processing cost (when the filer reports one)"
+    put((24, "Opex. To GWP ratio", None), "Operating Expenses (NL-7 alone) / GWP",
+        [_inp("Operating Expenses", "NL-7", "Cr", opex_alone_cur, opex_alone_prior), _gwp_in])
+    put((24, "Manpower to GWP ratio", None), "Manpower used / GWP", _manp_in + [_gwp_in], _manp_note)
+    put((24, "IT spend to GWP ratio", None), "IT capex (NL-14 additions) / GWP",
+        [_inp("IT capex", "NL-14", "Cr", it_cur, None), _gwp_in],
+        "PRIOR is backfilled from last year's filing", cur_only=True)
 
     # Slide 25: manpower/facility metrics (Rs. Lakhs, not Rs. - verified
     # against GT)
@@ -2479,8 +2920,17 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     counts = [c for c in (opening_offices, closing_offices) if c]
     offices_cur = sum(counts) / len(counts) if counts else get("offices_count")[0]
     D[(25, "Manpower cost to total Opex", None)] = (safe_div(manpower_cur, opex_alone_cur), safe_div(manpower_prior, opex_alone_prior))
+    put((25, "Manpower cost to total Opex", None), "Manpower used / Operating Expenses (NL-7 alone)",
+        _manp_in + [_inp("Operating Expenses", "NL-7", "Cr", opex_alone_cur, opex_alone_prior)], _manp_note)
     if manpower_cur is not None and avg_employees_cur:
         D[(25, "Manpower cost per employee", None)] = (round_half_up(manpower_cur * 100 / avg_employees_cur, 4), None)
+        put((25, "Manpower cost per employee", None),
+            "Manpower used x 100 / Average on-roll headcount  [Cr -> Rs. Lakhs]",
+            [_inp("Manpower used", "derived", "Cr", manpower_cur, None),
+             _inp("Opening on-roll (FY start)", "last year NL-41", "count", opening_employees, None),
+             _inp("Closing on-roll", "NL-41", "count", employees_cur, None),
+             _inp("Average headcount", "derived", "count", avg_employees_cur, None)],
+            "Average = (opening + closing) / 2; closing alone when opening is unavailable", cur_only=True)
     rent_cur, rent_prior = get("rent_expense")
     if rent_cur is not None and offices_cur:
         # Rent is a cumulative YTD figure, so the monthly run-rate divides by
@@ -2489,6 +2939,15 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
         months = cfg.months_elapsed()
         D[(25, "Facility rental per office per month", None)] = (
             round_half_up(rent_cur * 100 / months / offices_cur, 4), None)
+        put((25, "Facility rental per office per month", None),
+            "Rent (YTD) x 100 / months elapsed / average offices  [Cr -> Rs. Lakhs]",
+            [_inp("Rent expense (YTD)", "NL-7", "Cr", rent_cur, None),
+             _inp("Months elapsed", "config", "months", months, None),
+             _inp("Opening offices", "NL-41", "count", opening_offices, None),
+             _inp("Closing offices", "NL-41", "count", closing_offices, None),
+             _inp("Average offices used", "derived", "count", offices_cur, None)],
+            "Offices = average of opening and closing (whichever exists); falls back to the model's closing count",
+            cur_only=True)
 
     # Slide 23: Net Worth = Share Capital + Reserves&Surplus - Debit balance
     # in P&L Account (per the authoritative formula sheet - no Fair Value
@@ -2512,6 +2971,12 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
         round_half_up(nw_cur * 100, 2) if nw_cur is not None else None,
         round_half_up(nw_prior * 100, 2) if nw_prior is not None else None,
     )
+    put((26, "Net Worth", None), "(Share Capital + Reserves & Surplus - Debit balance in P&L) x 100  [Cr -> Rs. Lakhs]",
+        [_inp("Share Capital", "NL-3", "Cr", cap_cur, cap_prior),
+         _inp("Reserves & Surplus", "NL-3", "Cr", res_cur, res_prior),
+         _inp("Debit balance in P&L", "NL-3", "Cr", dr_cur, dr_prior),
+         _inp("Net Worth (Cr)", "derived", "Cr", nw_cur, nw_prior)],
+        "Fair-value change on shareholders' funds is NOT added (per the formula sheet)")
 
     # Slide 26's "Capital" row = Cumulative Capital = Share Capital + Share
     # Application Money Pending Allotment + Share Premium, read directly off
@@ -2522,9 +2987,12 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     # Share Capital alone (which is still used, unmodified, in Net Worth's
     # own formula below via get("capital")).
     D[(26, "Capital", None)] = income.get("cumulative_capital", (None, None))
+    passthrough((26, "Capital", None), "Cumulative Capital", "Cumulative Capital", "NL-3/NL-10", "Cr",
+                income.get("cumulative_capital", (None, None)))
 
     # Slide 30: Historical Trends duplicate GWP/PBT from Slide 18
     D[(31, "GWP", None)] = (gwp_cur, gwp_prior)
+    passthrough((31, "GWP", None), "Gross Written Premium", "GWP (Slide 18)", "NL-4", "Cr", (gwp_cur, gwp_prior))
     # Slides 26/30's PBT rows repeat Slide 18's cumulative PBT, for every
     # company without exception. An earlier version substituted the
     # single-quarter figure here for the one insurer whose NL-2 has no ruled
@@ -2535,25 +3003,41 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     D[(31, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
     # Slide 26 also has its own PBT row (alongside Capital/Net Worth) - same figure.
     D[(26, "PBT", None)] = (pbt2327_cur, pbt2327_prior)
+    for _s in (31, 26):
+        put((_s, "PBT", None), "= Slide 18 PBT (cumulative, up to the quarter)",
+            [_inp("PBT (Slide 18)", "NL-2", "Cr", pbt2327_cur, pbt2327_prior)])
 
     # Slide 35: Investment Yield, read directly off NL-31's own TOTAL row
     # (see extract_investment_yield) - not computed here.
     D[(36, "Investment Yield", None)] = income.get("investment_yield", (None, None))
+    passthrough((36, "Investment Yield", None), "Investment Yield", "Investment Yield", "NL-31", "ratio",
+                income.get("investment_yield", (None, None)))
 
     # Slide 28: Investment Portfolio, read directly off NL-31's per-category
     # rows summed by bucket (see extract_investment_portfolio) - not computed here.
     for bucket, (cur_v, prior_v) in income.get("investment_portfolio", {}).items():
         D[(28, bucket, None)] = (cur_v, prior_v)
+        passthrough((28, bucket, None), f"Portfolio:{bucket}", bucket, "NL-31", "Cr", (cur_v, prior_v))
 
     # Slide 33: reinsurance ratios (current period only - NL-33 has no prior-year column)
     ri_ceded_cur, _ = get("ri_ceded_total")
     ri_comm_cur, _ = get("ri_commission")
     D[(34, "RI Ceding to GWP Ratio", "Risk Ceded")] = (safe_div(ri_ceded_cur, gwp_cur), None)
     D[(34, "RI Commission to RI Ceding", "Risk Ceded")] = (safe_div(ri_comm_cur, ri_ceded_cur), None)
+    put((34, "RI Ceding to GWP Ratio", "Risk Ceded"), "RI ceded premium (NL-33 total) / GWP",
+        [_inp("RI ceded total", "NL-33", "Cr", ri_ceded_cur, None), _gwp_in],
+        "Current period only - NL-33 has no prior-year column", cur_only=True)
+    put((34, "RI Commission to RI Ceding", "Risk Ceded"), "RI commission (NL-6) / RI ceded premium (NL-33 total)",
+        [_inp("RI commission", "NL-6", "Cr", ri_comm_cur, None), _inp("RI ceded total", "NL-33", "Cr", ri_ceded_cur, None)],
+        cur_only=True)
 
     # Slide 34: ROE = PAT / Average Net Worth (current period only)
     if pat_cur is not None and nw_cur is not None and nw_prior is not None and (nw_cur + nw_prior) != 0:
         D[(35, "ROE (SAHI)", "PAT/Avg. Net Worth")] = (round_half_up(pat_cur / ((nw_cur + nw_prior) / 2), 4), None)
+        put((35, "ROE (SAHI)", "PAT/Avg. Net Worth"), "PAT / ((Net Worth current + Net Worth prior) / 2)",
+            [_inp("PAT", "NL-2", "Cr", pat_cur, None), _inp("Net Worth current", "derived", "Cr", nw_cur, None),
+             _inp("Net Worth prior", "derived", "Cr", nw_prior, None)],
+            "Net Worth here is in Cr (not the x100 Lakhs figure shown on Slide 26)", cur_only=True)
 
     # Slide 13: despite the "% to GDPI" label, GT wants the absolute
     # commission amount in Rs. Lakhs, not a computed ratio - verified
@@ -2568,6 +3052,9 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
             round_half_up(comm_cur * 100, 2) if comm_cur is not None else None,
             round_half_up(comm_prior * 100, 2) if comm_prior is not None else None,
         )
+        put((13, "Channel-wise Gross Commision % to GDPI", gemini_extract.SLIDE13_METRIC2[metric2]),
+            "Channel commission (NL-6) x 100  [Cr -> Rs. Lakhs; absolute amount despite the '%' label]",
+            [_inp(f"Commission - {metric2}", "NL-6", "Cr", comm_cur, comm_prior)])
         # The channel's commission rate: its NL-6 commission over its own
         # NL-36 premium (both already Rs. Crore here). The row above stays the
         # absolute amount - it gives the bar's size and total on the chart -
@@ -2575,6 +3062,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
         prem_cur, prem_prior = get(f"channel_premium_{metric2}")
         D[(13, SLIDE13_RATE_METRIC1, gemini_extract.SLIDE13_METRIC2[metric2])] = (
             safe_div(comm_cur, prem_cur), safe_div(comm_prior, prem_prior))
+        put((13, SLIDE13_RATE_METRIC1, gemini_extract.SLIDE13_METRIC2[metric2]),
+            "Channel commission (NL-6) / Channel premium (NL-36)",
+            [_inp(f"Commission - {metric2}", "NL-6", "Cr", comm_cur, comm_prior),
+             _inp(f"Premium - {metric2}", "NL-36", "Cr", prem_cur, prem_prior)])
 
     # Extraction (gemini_extract.STATES) asks NL-34 for every state/UT by
     # name, not just the 7 Slide 17 shows - the rest all feed Slide 16's
@@ -2598,6 +3089,8 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     for state in gemini_extract.STATES8_NAMED:
         D[(17, state, None)] = (safe_div(state_abs_cur.get(state), gwp_cur),
                                 safe_div(state_abs_prior.get(state), gwp_prior))
+        put((17, state, None), f"{state} GDPI (NL-34) / GWP",
+            [_inp(f"{state} GDPI", "NL-34", "Cr", state_abs_cur.get(state), state_abs_prior.get(state)), _gwp_in])
 
     other_states = [s for s in state_abs_cur if s not in gemini_extract.STATES8_NAMED]
 
@@ -2610,6 +3103,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     others_cur = sum_or_none(state_abs_cur, other_states, raw_others_cur)
     others_prior = sum_or_none(state_abs_prior, other_states, raw_others_prior)
     D[(17, "Others", None)] = (safe_div(others_cur, gwp_cur), safe_div(others_prior, gwp_prior))
+    put((17, "Others", None), "(Sum of every extracted state not shown on the slide + NL-34 'Others') / GWP",
+        [_inp(f"{st} GDPI", "NL-34", "Cr", state_abs_cur.get(st), state_abs_prior.get(st)) for st in other_states]
+        + [_inp("NL-34 'Others' row", "NL-34", "Cr", raw_others_cur, raw_others_prior),
+           _inp("Others total", "derived", "Cr", others_cur, others_prior), _gwp_in])
 
     # Slide 16: zone-wise GDPI as a fraction of company GWP, summing EVERY
     # extracted state's absolute value by zone via STATE_TO_ZONE - same
@@ -2621,6 +3118,10 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     for zone in ("North", "South", "East", "West", "Central"):
         zc, zp = zone_total(zone, state_abs_cur), zone_total(zone, state_abs_prior)
         D[(16, zone, None)] = (safe_div(zc, gwp_cur), safe_div(zp, gwp_prior))
+        put((16, zone, None), f"Sum of {zone}-zone states' GDPI (NL-34) / GWP",
+            [_inp(f"{st} GDPI", "NL-34", "Cr", state_abs_cur.get(st), state_abs_prior.get(st))
+             for st, z in STATE_TO_ZONE.items() if z == zone]
+            + [_inp(f"{zone} total", "derived", "Cr", zc, zp), _gwp_in])
 
     # "Others (unclassified)" = any extracted state with no zone in
     # STATE_TO_ZONE (none today - every named state above has one) + NL-34's
@@ -2632,16 +3133,24 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     unclass_cur = sum_or_none(state_abs_cur, unmapped, raw_others_cur)
     unclass_prior = sum_or_none(state_abs_prior, unmapped, raw_others_prior)
     D[(16, "Others (unclassified)", None)] = (safe_div(unclass_cur, gwp_cur), safe_div(unclass_prior, gwp_prior))
+    put((16, "Others (unclassified)", None), "(States with no zone + NL-34 'Others') / GWP",
+        [_inp(f"{st} GDPI", "NL-34", "Cr", state_abs_cur.get(st), state_abs_prior.get(st)) for st in unmapped]
+        + [_inp("NL-34 'Others' row", "NL-34", "Cr", raw_others_cur, raw_others_prior), _gwp_in])
 
     # Slide 12: GDPI by channel (coarser 6-bucket split, company-specific metric1)
     metric1_12 = gemini_extract.SLIDE12_COMPANY_METRIC1.get(company)
     if metric1_12:
         for metric2, sheet_metric2 in gemini_extract.SLIDE12_DIRECT_METRIC2.items():
             D[(12, "__SLIDE12__" + metric1_12, sheet_metric2)] = get(f"channel_premium_{metric2}")
+            _c, _p = get(f"channel_premium_{metric2}")
+            put((12, "__SLIDE12__" + metric1_12, sheet_metric2), f"Channel premium - {metric2} (NL-36), as extracted",
+                [_inp(f"Premium - {metric2}", "NL-36", "Cr", _c, _p)])
         others_cur = others_prior = 0
         any_val = False
+        _oth_in = []
         for k in gemini_extract.SLIDE12_OTHERS_KEYS:
             c, p = get(f"channel_premium_{k}")
+            _oth_in.append(_inp(f"Premium - {k}", "NL-36", "Cr", c, p))
             if c is not None:
                 others_cur += c
                 any_val = True
@@ -2649,6 +3158,8 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
                 others_prior += p
         if any_val:
             D[(12, "__SLIDE12__" + metric1_12, "Others")] = (round_half_up(others_cur, 2), round_half_up(others_prior, 2))
+            put((12, "__SLIDE12__" + metric1_12, "Others"), "Sum of CSC + IMF + Web Aggregator + POS channel premium (NL-36)",
+                _oth_in)
 
     # Slide 15: Individual ATS (Rs per policy) and Average Productivity (Rs per agent)
     prem_ia_cur, prem_ia_prior = get("channel_premium_Individual Agents")
@@ -2659,7 +3170,16 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     )
     # Rs. Lakhs per agent, using the Individual Agents channel's OWN premium
     # (not total company GWP) - verified exactly against GT.
+    put((15, "Individual ATS", "Individual agents GWP/Individual agents no. of policies"),
+        "Individual Agents premium x 1e7 / Individual Agents policies  [Cr -> Rs. per policy]",
+        [_inp("Individual Agents premium", "NL-36", "Cr", prem_ia_cur, prem_ia_prior),
+         _inp("Individual Agents policies", "NL-36", "count", pol_ia_cur, pol_ia_prior)])
     agents_cur, _ = get("agents_individual")
+    put((15, "Average Productivity (per agent)", "Premium/No. of Individual Agents"),
+        "Individual Agents premium x 100 / No. of individual agents  [Cr -> Rs. Lakhs per agent]",
+        [_inp("Individual Agents premium", "NL-36", "Cr", prem_ia_cur, None),
+         _inp("No. of individual agents", "NL-41", "count", agents_cur, None)],
+        "Uses the Individual Agents channel's own premium, not total GWP", cur_only=True)
     if prem_ia_cur is not None and agents_cur:
         D[(15, "Average Productivity (per agent)", "Premium/No. of Individual Agents")] = (
             round_half_up(prem_ia_cur * 100 / agents_cur, 4), None)
@@ -2677,6 +3197,14 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     if os_start_cur is not None and reported_cur is not None:
         claims_denom_cur = os_start_cur + reported_cur - (os_end_cur or 0)
     D[(23, "Claims Settlement Ratio", None)] = (safe_div(settled_cur, claims_denom_cur), None)
+    put((23, "Claims Settlement Ratio", None),
+        "Claims settled / (O/S at beginning + reported - O/S at end)",
+        [_inp("Claims settled", "NL-37", "count", settled_cur, None),
+         _inp("O/S at beginning", "NL-37", "count", os_start_cur, None),
+         _inp("Reported during period", "NL-37", "count", reported_cur, None),
+         _inp("O/S at end", "NL-37", "count", os_end_cur, None),
+         _inp("Denominator", "derived", "count", claims_denom_cur, None)],
+        "NL-37 Total column; current period only", cur_only=True)
 
     # Total policy count = NL-36's own Grand Total (A+B) "No. of Policies",
     # read directly - every channel, Direct Business/MISP included. Summing
@@ -2698,6 +3226,8 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     # paid, read directly off NL-39 (see extract_average_claim_size) -
     # current-quarter only, since NL-39 itself has no YTD/prior-year column.
     D[(23, "Average Claim Size", None)] = income.get("average_claim_size", (None, None))
+    passthrough((23, "Average Claim Size", None), "Average Claim Size", "Average Claim Size", "NL-39", "Rs.",
+                income.get("average_claim_size", (None, None)))
     # No. of claims to No. of policies = NL-45's total claims (current year,
     # item 5) / NL-36's total policies (up to the quarter, every channel).
     # Current period only - the prior value is backfilled from last year's
@@ -2706,16 +3236,35 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onr
     # NL-37's amount block and NL-45 items 6/7); the prior is backfilled
     # from last year's Data Engine.
     D[(27, "Claim Settlement Ratio (Amount)", None)] = income.get("csr_amount", (None, None))
+    passthrough((27, "Claim Settlement Ratio (Amount)", None), "CSR Amount", "CSR (Amount)", "NL-37", "ratio",
+                income.get("csr_amount", (None, None)))
     policy_complaints, claim_complaints = income.get("complaint_ratios", (None, None))
     D[(27, "Claim Complaints per 10,000 claims", None)] = (claim_complaints, None)
+    put((27, "Claim Complaints per 10,000 claims", None), "NL-45 item 7, as printed",
+        [_inp("Claim complaints per 10,000 claims", "NL-45", "ratio", claim_complaints, None)], cur_only=True)
+    put((27, "Policy Complaints per 10,000 policies", None), "NL-45 item 6, as printed",
+        [_inp("Policy complaints per 10,000 policies", "NL-45", "ratio", policy_complaints, None)], cur_only=True)
     D[(27, "Policy Complaints per 10,000 policies", None)] = (policy_complaints, None)
 
     nl45_claims_cur, _ = income.get("nl45_claims", (None, None))
     D[(23, SLIDE23_CLAIMS_METRIC1, None)] = (nl45_claims_cur, None)
+    T[(23, SLIDE23_CLAIMS_METRIC1, None)] = raw_trace(
+        "NL-45", "NL-45 (Grievance Disposal) item 5, total claims during the year, as printed", nl45_claims_cur,
+        unit="count")
     D[(23, SLIDE23_POLICIES_METRIC1, None)] = (total_policies_cur, None)
+    _pol_in = [_inp(f"Policies - {m2}", "NL-36", "count", get(f"channel_policies_{m2}")[0], None)
+               for _, m2 in gemini_extract.CHANNELS_36]
+    put((23, SLIDE23_POLICIES_METRIC1, None),
+        "NL-36 Grand Total (A+B) policies when printed, else sum of the channel policy counts",
+        _pol_in + [_inp("NL-36 printed total", "NL-36", "count", nl36_total_cur, None)],
+        "Printed total wins over the channel sum when present (it includes Direct Business/MISP)", cur_only=True)
     if nl45_claims_cur is not None and total_policies_cur:
         D[(23, "No. of claims to No. of policies", None)] = (
             round_half_up(nl45_claims_cur / total_policies_cur, 6), None)
+        put((23, "No. of claims to No. of policies", None), "Total claims (NL-45 item 5) / Total policies (NL-36)",
+            [_inp("Total claims", "NL-45", "count", nl45_claims_cur, None),
+             _inp("Total policies", "NL-36", "count", total_policies_cur, None)],
+            "PRIOR is backfilled from last year's filing", cur_only=True)
 
     return D
 
@@ -2871,6 +3420,7 @@ def _assemble_company(company, specs, raw, inc):
         "csr_amount": inc.get("CSR Amount", (None, None)),
         "complaint_ratios": inc.get("NL-45 Complaint Ratios", (None, None)),
         "cumulative_capital": inc.get("Cumulative Capital", (None, None)),
+        "_traces": inc.get("_traces", {}),
     }
 
     return regrouped, income, kind_by_key, rows_by_key, raw_for_derivation
@@ -2892,7 +3442,7 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
     if company not in apply_income_statement_rows._cache:
         apply_income_statement_rows._cache[company] = extract_income_statement(company, pdf_path)
     inc = apply_income_statement_rows._cache[company]
-    regrouped, income, kind_by_key, rows_by_key, _ = _assemble_company(company, specs, raw, inc)
+    regrouped, income, kind_by_key, rows_by_key, raw_d = _assemble_company(company, specs, raw, inc)
 
     idx = build_row_index(ws)
     # NOT named `log` - this function also uses the module-level logger
@@ -2915,18 +3465,33 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
             # percentage and rescale, regardless of which company it is.
             cur = cur / 100 if cur is not None and cur > 20 else cur
             prior = prior / 100 if prior is not None and prior > 20 else prior
+        rv = raw_d.get(key) or {}
+        read_trace = None
+        if rv.get("found"):
+            conv = {"money": " / 100 [Lakhs -> Cr]", "percent": " / 100 [% -> fraction]"}.get(kind_by_key[key], "")
+            where = rv.get("source_form") or "the filing"
+            if rv.get("page_number"):
+                where += f" p.{rv['page_number']}"
+            bits = [f"evidence: {str(rv['evidence'])[:300]}"] if rv.get("evidence") else []
+            bits += [b for b in (RAW_KEY_NOTES.get(key), rv.get("notes")) if b]
+            read_trace = Trace(f"Read: {where}, value as printed{conv}",
+                               [Inp("As printed", rv.get("fy26_q3"), "", "")],
+                               [Inp("As printed", rv.get("fy25_q3"), "", "")], "; ".join(bits) or None)
         for (slide, metric1, metric2) in rows:
-            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log)
+            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log,
+                                            trace=read_trace)
 
-    derived = compute_derived_metrics(company, regrouped, kind_by_key, income)
+    traces = {}
+    derived = compute_derived_metrics(company, regrouped, kind_by_key, income, traces=traces)
     for (slide, metric1, metric2), (cur, prior) in derived.items():
+        tr = traces.get((slide, metric1, metric2))
         if metric1.startswith("__SLIDE12__"):
             actual_metric1 = metric1[len("__SLIDE12__"):]
-            written += apply_metric_to_rows(ws, idx, slide, "GDPI by Channel - SAHI", actual_metric1, metric2, cur, prior, dry_run, applied_log)
+            written += apply_metric_to_rows(ws, idx, slide, "GDPI by Channel - SAHI", actual_metric1, metric2, cur, prior, dry_run, applied_log, trace=tr)
         else:
-            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log)
+            written += apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, dry_run, applied_log, trace=tr)
 
-    write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived)
+    write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived, traces)
 
     if not dry_run:
         # This company's figures become next year's prior-period facts. Never
@@ -2965,7 +3530,7 @@ def build_derived(company, pdf_path, raw=None, inc=None, opening_onroll=None):
 apply_company_gemini_pipeline._raw_cache = {}
 
 
-def write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived):
+def write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived, traces=None):
     """Persists, per company, exactly which Excel cell every LLM-extracted or
     Python-derived value was written to, alongside the LLM's own evidence
     fields (source_form/page_number/evidence/notes) - so any filled Excel
@@ -2980,9 +3545,12 @@ def write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived):
             "target_rows": [{"slide": s, "metric1": m1, "metric2": m2} for (s, m1, m2) in rows_by_key.get(key, [])],
         })
     for (slide, metric1, metric2), (cur, prior) in derived.items():
+        tr = (traces or {}).get((slide, metric1, metric2))
+        formula, inputs = tr.render() if tr is not None else (None, None)
         entries.append({
             "key": None, "source": "derived",
             "fy26_q3": cur, "fy25_q3": prior,
+            "formula": formula, "inputs": inputs,
             "target_rows": [{"slide": slide, "metric1": metric1.removeprefix("__SLIDE12__"), "metric2": metric2}],
         })
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", company)

@@ -125,7 +125,14 @@ DOWNLOAD_CHUNK_BYTES = 256 * 1024
 # 512MB Render instance during retrieval - a distinct gap from Phase 2
 # extraction, which already has its own worker/memory tuning
 # (PDF_PARSE_MAX_WORKERS, MEMORY_BUDGET_MB).
-MAX_CONCURRENT_DOWNLOADS = 4
+#
+# Candidates are now hedged (CANDIDATE_STAGGER_SECONDS), so roughly one to three
+# downloads per company are live at once, and each is bounded by
+# MAX_DOWNLOAD_BYTES. 8 lets all eight companies download together on a larger
+# instance (worst case ~8 x 50MB buffered); at 4 a 14MB Star PDF queued behind
+# other companies' files. Set MAX_CONCURRENT_DOWNLOADS=4 (or lower) in the
+# environment of a 512MB container.
+MAX_CONCURRENT_DOWNLOADS = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "8")))
 
 # `read` is the longest silence tolerated BETWEEN chunks, not the whole transfer,
 # so a large file that keeps streaming is unaffected. A stalled connection

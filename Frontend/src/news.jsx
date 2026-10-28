@@ -5,22 +5,15 @@ import { Badge, Button, Card, Spinner } from "./ui.jsx";
 import { CompanyDot, ErrorCard, LoadingCard, companyName } from "./analysisShared.jsx";
 
 // ---------------------------------------------------------------------------
-// Competitor News: recent articles per insurer, one compact row each. Fetched
-// by the backend (Parallel search, Gemini summary + tag) and cached there, so
-// opening the tab is cheap; Refresh forces a re-fetch.
+// Competitor News: the top-ranked recent articles across the competitors
+// (ranked by the backend: importance + recency, capped per insurer). Each is a
+// block with the headline and a short description. Refresh forces a re-fetch.
 // ---------------------------------------------------------------------------
 
-const COMPANIES = ["NBHI", "STAR", "CARE", "CIGNA", "ABHI", "NARAYANA", "GALAXY"];
 const TAG_TONE = {
   Regulatory: "amber", Financial: "emerald", Product: "sky",
   "Claims/Customer": "rose", Partnership: "violet", Leadership: "slate", Other: "slate",
 };
-const COLLAPSED_ROWS = 4;
-
-const pillClass = (active) =>
-  `rounded-full border px-3 py-1 text-xs transition-colors ${
-    active ? "border-brand-500/50 bg-brand-500/15 text-white" : "border-slate-800 text-slate-400 hover:text-white"
-  }`;
 
 function relativeTime(iso) {
   if (!iso) return null;
@@ -33,68 +26,38 @@ function relativeTime(iso) {
   return new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-function ArticleRow({ item }) {
+function NewsBlock({ item }) {
   const when = relativeTime(item.publish_date);
-  const meta = [item.source, when].filter(Boolean).join(" · ");
   return (
-    <li className="py-2 first:pt-0 last:pb-0">
-      <div className="flex items-start gap-2">
-        <a href={item.url} target="_blank" rel="noopener noreferrer" title={item.title}
-           className="min-w-0 flex-1 text-sm text-slate-100 hover:text-brand-300 line-clamp-1">
-          {item.title}
-        </a>
-        {item.tag && <Badge tone={TAG_TONE[item.tag] || "slate"}>{item.tag}</Badge>}
+    <Card className="p-4 flex flex-col gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        {item.companies.map((c) => (
+          <span key={c} className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-200">
+            <CompanyDot company={c} /> {companyName(c)}
+          </span>
+        ))}
+        {item.tag && <span className="ml-auto"><Badge tone={TAG_TONE[item.tag] || "slate"}>{item.tag}</Badge></span>}
       </div>
-      <div className="text-[11px] text-slate-500 line-clamp-1" title={item.summary || meta}>
-        {meta}{item.summary ? ` — ${item.summary}` : ""}
+      <a href={item.url} target="_blank" rel="noopener noreferrer"
+         className="text-sm font-semibold text-white hover:text-brand-300 line-clamp-2">
+        {item.title}
+      </a>
+      {item.description && <p className="text-sm text-slate-400 line-clamp-3">{item.description}</p>}
+      <div className="mt-auto pt-1 text-[11px] text-slate-500">
+        {[item.source, when].filter(Boolean).join(" · ")}
       </div>
-    </li>
-  );
-}
-
-function CompanyNewsCard({ entry, tag }) {
-  const [expanded, setExpanded] = useState(false);
-  const items = entry.items.filter((i) => tag === "All" || i.tag === tag);
-  const shown = expanded ? items : items.slice(0, COLLAPSED_ROWS);
-  const hidden = items.length - shown.length;
-  return (
-    <Card className="p-4">
-      <div className="flex items-center gap-2 mb-3">
-        <CompanyDot company={entry.company} />
-        <h2 className="text-sm font-semibold text-white">{companyName(entry.company)}</h2>
-        <span className="ml-auto"><Badge>{items.length}</Badge></span>
-      </div>
-      {entry.error && (
-        <div className="text-xs text-rose-300 mb-2">Couldn't fetch news: {entry.error}</div>
-      )}
-      {items.length === 0 && !entry.error && (
-        <div className="text-xs text-slate-500">No recent news{tag !== "All" ? ` tagged ${tag}` : ""}.</div>
-      )}
-      {items.length > 0 && (
-        <ul className="divide-y divide-slate-800/70">
-          {shown.map((i) => <ArticleRow key={i.url} item={i} />)}
-        </ul>
-      )}
-      {(hidden > 0 || expanded) && items.length > COLLAPSED_ROWS && (
-        <button onClick={() => setExpanded((e) => !e)}
-                className="mt-2 text-xs text-brand-300 hover:text-brand-200">
-          {expanded ? "Show less" : `Show ${hidden} more`}
-        </button>
-      )}
     </Card>
   );
 }
 
 export function NewsView() {
-  const [company, setCompany] = useState("All");
-  const [tag, setTag] = useState("All");
   const [state, setState] = useState({ loading: true, data: null, error: null });
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback((refresh = false) => {
     if (refresh) setRefreshing(true);
     else setState({ loading: true, data: null, error: null });
-    API.getNews(null, refresh)
+    API.getNews(refresh)
       .then((data) => setState({ loading: false, data, error: null }))
       .catch((error) => setState({ loading: false, data: null, error }))
       .finally(() => setRefreshing(false));
@@ -103,11 +66,7 @@ export function NewsView() {
   useEffect(() => { load(); }, [load]);
 
   const data = state.data;
-  const entries = data ? data.companies.filter((c) => company === "All" || c.company === company) : [];
-  const tags = data
-    ? Object.keys(TAG_TONE).filter((t) => data.companies.some((c) => c.items.some((i) => i.tag === t)))
-    : [];
-  const fetchedAt = data && data.companies.map((c) => c.fetched_at).filter(Boolean).sort()[0];
+  const updated = data?.fetched_at ? relativeTime(data.fetched_at) : null;
 
   return (
     <div className="max-w-6xl mx-auto space-y-5">
@@ -115,8 +74,8 @@ export function NewsView() {
         <div>
           <h1 className="text-xl font-semibold text-white">Competitor news</h1>
           <p className="text-sm text-slate-400 mt-0.5">
-            Last {data?.lookback_days ?? 30} days
-            {fetchedAt ? ` · updated ${relativeTime(fetchedAt) === "today" ? "today" : relativeTime(fetchedAt)}` : ""}
+            Top stories from the last {data?.lookback_days ?? 30} days, ranked by importance and recency
+            {updated ? ` · updated ${updated}` : ""}
           </p>
         </div>
         <div className="ml-auto">
@@ -130,25 +89,23 @@ export function NewsView() {
       {state.error && <ErrorCard error={state.error} onRetry={() => load()} />}
       {data && (
         <>
-          <div className="flex flex-wrap gap-1.5">
-            {["All", ...COMPANIES].map((c) => (
-              <button key={c} onClick={() => setCompany(c)} className={pillClass(company === c)}>
-                {c === "All" ? "All" : companyName(c)}
-              </button>
-            ))}
-          </div>
-          {tags.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {["All", ...tags].map((t) => (
-                <button key={t} onClick={() => setTag(t)} className={pillClass(tag === t)}>
-                  {t === "All" ? "All topics" : t}
-                </button>
-              ))}
+          {data.errors.length > 0 && (
+            <div className="text-xs text-rose-300">
+              Couldn't fetch news for {data.errors.map((e) => companyName(e.company)).join(", ")}
+              {data.items.length === 0 ? `: ${data.errors[0].error}` : ""}
             </div>
           )}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {entries.map((e) => <CompanyNewsCard key={e.company} entry={e} tag={tag} />)}
+          {data.items.length === 0 && data.errors.length === 0 && (
+            <Card className="p-8 text-center text-sm text-slate-400">No recent competitor news found.</Card>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {data.items.map((i) => <NewsBlock key={i.url} item={i} />)}
           </div>
+          {data.items.length > 0 && !data.summarised && (
+            <p className="text-[11px] text-slate-500">
+              AI summaries unavailable - showing excerpts, ranked by recency only.
+            </p>
+          )}
         </>
       )}
     </div>

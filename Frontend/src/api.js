@@ -76,17 +76,18 @@ async function requestFile(path, method, formData) {
   return res.json();
 }
 
-/** POST to the chat endpoint and parse its Server-Sent Events stream, calling
- * onEvent(event, data) for each one (text, tool_status, chart, table,
- * verification, citations, done, error). Resolves when the stream ends. */
-async function streamChat(messages, period, onEvent, signal) {
+/** POST one user message to a chat session (the server owns the transcript)
+ * and parse its Server-Sent Events stream, calling onEvent(event, data) for
+ * each one (text, tool_status, chart, table, verification, citations, done,
+ * error). Resolves when the stream ends. */
+async function streamChat(sessionId, message, period, onEvent, signal) {
   let res;
   try {
     res = await fetch(`${BASE}/api/analysis/chat`, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, period }),
+      body: JSON.stringify({ session_id: sessionId, message, period }),
     });
   } catch (cause) {
     if (cause?.name === "AbortError") throw cause;
@@ -139,8 +140,12 @@ export const API = {
   getHighlights: (period) => request(`/analysis/highlights${q({ period })}`),
   getNarrative: (period, refresh = false) => request(`/analysis/narrative${q({ period, refresh: refresh || null })}`),
   getDeepDive: (company, period) => request(`/analysis/deepdive/${encodeURIComponent(company)}${q({ period })}`),
-  getNews: (company, refresh = false) => request(`/analysis/news${q({ company, refresh: refresh || null })}`),
+  getNews: (refresh = false) => request(`/analysis/news${q({ refresh: refresh || null })}`),
   streamChat,
+  listChats: () => request("/analysis/chat/sessions").then((d) => d.sessions),
+  getChat: (id) => request(`/analysis/chat/sessions/${encodeURIComponent(id)}`),
+  renameChat: (id, title) => request(`/analysis/chat/sessions/${encodeURIComponent(id)}`, { method: "PATCH", body: { title } }),
+  deleteChat: (id) => request(`/analysis/chat/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // -- metadata ------------------------------------------------------------
   health: () => request("/health"),

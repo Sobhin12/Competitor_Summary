@@ -1,13 +1,16 @@
 """
-Recent news per competitor, for the dashboard's News tab.
+Top competitor news for the dashboard's News tab.
 
-Phase 1 of a fetch is a Parallel Search API call per insurer (last 30 days);
-phase 2 is one Gemini call per insurer that drops off-topic hits and adds a
-one-line summary and a category tag. If Gemini is unavailable the headlines
-are still returned, flagged `summarised: False`.
+Phase 1 of a fetch is a Parallel Search API call per competitor insurer (last
+30 days; Niva Bupa is excluded - this is competitor intelligence); phase 2 is
+one Gemini call per insurer that drops off-topic hits and adds a short
+summary, a category tag and a 1-5 importance score. The articles are then
+pooled across insurers and ranked, and the top NEWS_TOP_N are returned. If
+Gemini is unavailable the headlines are still ranked (by recency) and shown
+with an excerpt as the description.
 
-Results are cached per company (news is not tied to a reporting period) for
-NEWS_TTL_HOURS, so opening the tab doesn't cost a search each time.
+Per-company fetches are cached for NEWS_TTL_HOURS (news is not tied to a
+reporting period); ranking happens at read time, so it is free to retune.
 """
 import asyncio
 import json
@@ -22,20 +25,23 @@ from competitor_analysis.storage import s3
 
 CACHE_DIR = paths.CACHE_DIR / "news"
 NEWS_TTL_HOURS = float(os.getenv("NEWS_TTL_HOURS", "6"))
+NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "8"))
+NEWS_MAX_PER_COMPANY = int(os.getenv("NEWS_MAX_PER_COMPANY", "3"))
 LOOKBACK_DAYS = 30
 SEARCH_TIMEOUT_SECONDS = 60
 MAX_RESULTS = 10
-MAX_ITEMS = 8
+MAX_ITEMS_PER_COMPANY = 8  # cached per company; the final list is cut to NEWS_TOP_N
 EXCERPT_CHARS = 600
+DESCRIPTION_CHARS = 220  # fallback description when there is no Gemini summary
+DEFAULT_IMPORTANCE = 3  # unscored articles (no Gemini, or cached before scoring existed)
 TAGS = ["Product", "Regulatory", "Financial", "Partnership", "Leadership", "Claims/Customer", "Other"]
 
-# Friendly names for search queries; the legal name comes from source_links.json.
+# The competitors we track (Niva Bupa is "us" and deliberately absent). Friendly
+# names are used in search queries; the legal name comes from source_links.json.
 _SEARCH_NAMES = {
-    "NBHI": "Niva Bupa", "STAR": "Star Health", "CARE": "Care Health", "CIGNA": "ManipalCigna",
+    "STAR": "Star Health", "CARE": "Care Health", "CIGNA": "ManipalCigna",
     "ABHI": "Aditya Birla Health", "NARAYANA": "Narayana Health Insurance", "GALAXY": "Galaxy Health Insurance",
 }
-
-# Same order as reporting.data.COMPANY_ORDER (not imported: that module needs a reporting period set at import).
 COMPANY_ORDER = list(_SEARCH_NAMES)
 
 _client = None
@@ -114,17 +120,30 @@ _SUMMARY_SCHEMA = {
             "relevant": {"type": "boolean"},
             "summary": {"type": "string"},
             "tag": {"type": "string", "enum": TAGS},
+            "importance": {"type": "integer"},
+            "duplicate_of": {"type": "string", "nullable": True},
             "publish_date": {"type": "string", "nullable": True},
         },
-        "required": ["url", "relevant", "summary", "tag"],
+        "required": ["url", "relevant", "summary", "tag", "importance"],
     }}},
     "required": ["articles"],
 }
 
 _PROMPT = """You are screening web search results for news about {legal} ({name}), an Indian standalone health insurer.
-For every article below return: relevant (true only if it is genuinely about this insurer - not a generic listicle,
-a different company, or a policy-document page), a summary of at most 25 words stating the news itself (no
-"this article"), a tag from {tags}, and publish_date as YYYY-MM-DD if the title or excerpt shows one, else null.
+The readers are the strategy team at a competing insurer. For every article below return:
+- relevant: true only if it is a specific news story about this insurer. False for generic listicles, articles about
+  a different company, policy-document or product-brochure pages, and archive / tag / company-profile / stock-quote
+  / "all news" listing pages.
+- duplicate_of: if the article reports the same event as an EARLIER article in the list (e.g. two outlets covering
+  the same results or launch), the url of that earlier article; otherwise null.
+- summary: what happened, in at most 35 words, stating the news itself (no "this article").
+- tag: one of {tags}.
+- importance: integer 1-5 for how much a competitor's strategy team should care. Be discriminating - across a batch
+  most articles should be 2 or 3 and at most one or two a 5. 5 = regulatory action or penalty, funding or IPO,
+  leadership change, a landmark product launch or partnership; 4 = quarterly results or other material financial
+  news, a significant launch; 3 = notable but incremental (smaller launches, awards, campaigns); 2 = minor or
+  routine; 1 = PR filler, advice columns, passing mentions.
+- publish_date: YYYY-MM-DD if the title or excerpt shows one, else null.
 Return every url exactly as given.
 
 Articles:
@@ -132,7 +151,7 @@ Articles:
 
 
 async def _summarise(company, items):
-    """Adds summary/tag to each item and drops irrelevant ones. Raises on any Gemini failure."""
+    """Adds summary/tag/importance to each item and drops irrelevant ones. Raises on any Gemini failure."""
     global _limiter
     if _limiter is None:
         _limiter = gemini.RateLimiter(gemini.GEMINI_RPM)
@@ -154,15 +173,12 @@ async def _summarise(company, items):
     out = []
     for i in items:
         v = verdicts.get(i["url"])
-        if v is None or not v.get("relevant"):
+        if v is None or not v.get("relevant") or v.get("duplicate_of"):
             continue
         out.append(i | {"summary": v["summary"].strip(), "tag": v["tag"],
+                        "importance": min(5, max(1, int(v["importance"]))),
                         "publish_date": i["publish_date"] or v.get("publish_date")})
     return out
-
-
-def _sort_key(item):
-    return item.get("publish_date") or ""
 
 
 def _cache_path(company):
@@ -194,7 +210,10 @@ async def _fetch_company(company, refresh):
             items, summarised = await _summarise(company, items), True
         except Exception:  # noqa: BLE001 - quota/outage: headlines are still worth showing
             summarised = False
-    items = sorted(items, key=_sort_key, reverse=True)[:MAX_ITEMS]
+    # The search's date filter is not strict; drop anything dated outside the window.
+    oldest = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    items = [i for i in items if not i.get("publish_date") or i["publish_date"][:10] >= oldest]
+    items = sorted(items, key=lambda i: i.get("publish_date") or "", reverse=True)[:MAX_ITEMS_PER_COMPANY]
     entry = {"company": company, "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
              "items": items, "summarised": summarised}
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -203,19 +222,67 @@ async def _fetch_company(company, refresh):
     return entry | {"cached": False}
 
 
-async def get_news(company=None, refresh=False):
-    """News for one company key, or all seven. One company failing never fails the rest."""
+def _age_days(publish_date, today):
+    try:
+        return max(0, (today - date.fromisoformat((publish_date or "")[:10])).days)
+    except ValueError:
+        return None
+
+
+def _score(item, today):
+    """Importance (1-5) plus up to 1 point of recency, fading to 0 over the lookback window."""
+    age = _age_days(item.get("publish_date"), today)
+    recency = 0.0 if age is None else max(0.0, 1 - age / LOOKBACK_DAYS)
+    return item.get("importance", DEFAULT_IMPORTANCE) + recency
+
+
+def rank(entries, limit=None, per_company=None, today=None):
+    """Pools every company's articles, merges the same URL across companies, and returns the top `limit`
+    with at most `per_company` per insurer (a merged article counts against each insurer it names)."""
+    limit = NEWS_TOP_N if limit is None else limit
+    per_company = NEWS_MAX_PER_COMPANY if per_company is None else per_company
+    today = today or date.today()
+
+    pooled = {}
+    for entry in entries:
+        for item in entry.get("items", []):
+            merged = pooled.setdefault(item["url"], item | {"companies": []})
+            if entry["company"] not in merged["companies"]:
+                merged["companies"].append(entry["company"])
+
+    ordered = sorted(pooled.values(), key=lambda i: (_score(i, today), i.get("publish_date") or ""), reverse=True)
+    taken, counts = [], {}
+    for item in ordered:
+        if len(taken) >= limit:
+            break
+        if any(counts.get(c, 0) >= per_company for c in item["companies"]):
+            continue
+        for c in item["companies"]:
+            counts[c] = counts.get(c, 0) + 1
+        taken.append(item)
+
+    return [{"title": i["title"], "url": i["url"], "source": i["source"], "publish_date": i.get("publish_date"),
+             "companies": i["companies"], "tag": i.get("tag"), "importance": i.get("importance"),
+             "description": i.get("summary") or i.get("excerpt", "")[:DESCRIPTION_CHARS].strip()}
+            for i in taken]
+
+
+async def get_news(company=None, refresh=False, limit=None):
+    """The top ranked competitor news. `company` (debugging) restricts the pool to one insurer.
+    One company failing never fails the rest; it is reported in `errors`."""
     if company is not None and company not in COMPANY_ORDER:
         raise ValueError(f"Unknown company '{company}'. Use one of: {', '.join(COMPANY_ORDER)}")
     keys = [company] if company else list(COMPANY_ORDER)
     results = await asyncio.gather(*(_fetch_company(k, refresh) for k in keys), return_exceptions=True)
-    companies = []
+    entries, errors = [], []
     for k, r in zip(keys, results):
         if isinstance(r, NewsUnavailable):
             raise r
         if isinstance(r, Exception):
-            r = {"company": k, "items": [], "summarised": False, "cached": False,
-                 "error": str(r)[:200] or type(r).__name__}
-        companies.append(r)
-    return {"companies": companies, "lookback_days": LOOKBACK_DAYS,
-            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            errors.append({"company": k, "error": str(r)[:200] or type(r).__name__})
+        else:
+            entries.append(r)
+    return {"items": rank(entries, limit), "errors": errors, "lookback_days": LOOKBACK_DAYS,
+            "summarised": bool(entries) and all(e.get("summarised") for e in entries if e["items"]),
+            "cached": bool(entries) and all(e.get("cached") for e in entries),
+            "fetched_at": min((e["fetched_at"] for e in entries), default=None)}

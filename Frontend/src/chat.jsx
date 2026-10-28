@@ -87,13 +87,77 @@ function AssistantMessage({ m }) {
   );
 }
 
-export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
+function ChatList({ sessions, activeId, busy, onOpen, onNew, onRename, onDelete }) {
+  return (
+    <aside className="hidden md:flex w-56 shrink-0 flex-col border-r border-slate-800 pr-3">
+      <Button variant="ghost" onClick={onNew} disabled={busy} className="mb-2 justify-start">
+        + New chat
+      </Button>
+      <div className="flex-1 overflow-y-auto space-y-0.5">
+        {sessions.length === 0 && <p className="px-2 py-1 text-xs text-slate-600">No saved chats yet.</p>}
+        {sessions.map((s) => (
+          <div key={s.id}
+               className={`group flex items-center rounded-lg ${s.id === activeId ? "bg-slate-800/80" : "hover:bg-slate-900"}`}>
+            <button onClick={() => onOpen(s.id)} disabled={busy} title={s.title}
+                    className="flex-1 min-w-0 truncate px-2 py-1.5 text-left text-sm text-slate-300 disabled:opacity-50">
+              {s.title}
+            </button>
+            <button onClick={() => onRename(s)} disabled={busy} aria-label="Rename chat"
+                    className="hidden group-hover:block px-1 text-xs text-slate-500 hover:text-slate-200">✎</button>
+            <button onClick={() => onDelete(s)} disabled={busy} aria-label="Delete chat"
+                    className="hidden group-hover:block px-1.5 text-xs text-slate-500 hover:text-rose-300">✕</button>
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+export function ChatView({ messages, setMessages, sessionId, setSessionId, seed, onSeedUsed }) {
   const { meta, error: metaError } = useAnalysisMeta();
   const [input, setInput] = useState("");
   const [period, setPeriod] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [sessions, setSessions] = useState([]);
+  const [listError, setListError] = useState(null);
   const abortRef = useRef(null);
   const endRef = useRef(null);
+
+  const refreshSessions = () =>
+    API.listChats().then((l) => { setSessions(l); setListError(null); }).catch((e) => setListError(e.message));
+  useEffect(() => { refreshSessions(); }, []);
+
+  async function openSession(id) {
+    if (busy || id === sessionId) return;
+    try {
+      const s = await API.getChat(id);
+      setMessages(s.messages);
+      setSessionId(id);
+    } catch (e) {
+      setListError(e.message);
+      refreshSessions();
+    }
+  }
+
+  function newChat() {
+    if (busy) return;
+    setMessages([]);
+    setSessionId(null);
+  }
+
+  async function renameSession(s) {
+    const title = window.prompt("Rename chat", s.title)?.trim();
+    if (!title || title === s.title) return;
+    try { await API.renameChat(s.id, title); } catch (e) { setListError(e.message); }
+    refreshSessions();
+  }
+
+  async function deleteSession(s) {
+    if (!window.confirm(`Delete "${s.title}"?`)) return;
+    try { await API.deleteChat(s.id); } catch (e) { setListError(e.message); }
+    if (s.id === sessionId) newChat();
+    refreshSessions();
+  }
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -106,8 +170,9 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
     const question = (text ?? input).trim();
     if (!question || busy) return;
     setInput("");
-    const history = [...messages.filter((m) => m.content && !m.error).map((m) => ({ role: m.role, content: m.content })),
-                     { role: "user", content: question }];
+    // The server owns the transcript; a new chat just names a fresh session.
+    const sid = sessionId || crypto.randomUUID();
+    if (!sessionId) setSessionId(sid);
     const assistant = { role: "assistant", content: "", tools: [], blocks: [], pending: true };
     setMessages((ms) => [...ms, { role: "user", content: question }, assistant]);
     setBusy(true);
@@ -121,7 +186,7 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await API.streamChat(history, period, (event, data) => {
+      await API.streamChat(sid, question, period, (event, data) => {
         if (event === "text") update((m) => ({ ...m, content: m.content + data }));
         else if (event === "tool_status") update((m) => ({ ...m, tools: [...m.tools, data] }));
         else if (event === "chart") update((m) => ({ ...m, blocks: [...m.blocks, { type: "chart", spec: data }] }));
@@ -136,6 +201,7 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
       update((m) => ({ ...m, pending: false, content: m.content.trim() }));
       setBusy(false);
       abortRef.current = null;
+      refreshSessions();
     }
   }
 
@@ -155,7 +221,11 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
   const llm = meta?.llm;
 
   return (
-    <div className="max-w-4xl mx-auto h-full flex flex-col">
+    <div className="max-w-6xl mx-auto h-full flex gap-4">
+    <ChatList sessions={sessions} activeId={sessionId} busy={busy}
+              onOpen={openSession} onNew={newChat} onRename={renameSession} onDelete={deleteSession} />
+    <div className="flex-1 min-w-0 max-w-4xl mx-auto h-full flex flex-col">
+      {listError && <p className="mb-2 text-xs text-rose-300">Chat history: {listError}</p>}
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <div>
           <h1 className="text-xl font-semibold text-white">Ask the data</h1>
@@ -167,7 +237,7 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
           {llm?.available && <span className="text-[11px] text-slate-500">{llm.provider} · {llm.model}</span>}
           <PeriodSelect meta={meta} value={period} onChange={setPeriod} />
           {messages.length > 0 && (
-            <Button variant="ghost" onClick={() => setMessages([])} disabled={busy}>New chat</Button>
+            <Button variant="ghost" onClick={newChat} disabled={busy}>New chat</Button>
           )}
         </div>
       </div>
@@ -227,6 +297,7 @@ export function ChatView({ messages, setMessages, seed, onSeedUsed }) {
           )}
         </div>
       </div>
+    </div>
     </div>
   );
 }

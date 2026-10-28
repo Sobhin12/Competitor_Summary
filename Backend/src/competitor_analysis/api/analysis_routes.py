@@ -3,11 +3,12 @@
     GET  /api/analysis/meta                     periods, companies, metric catalog, LLM status
     GET  /api/analysis/highlights?period=       rule-based insights + data checks
     GET  /api/analysis/narrative?period=        LLM executive narrative over those insights
-    GET  /api/analysis/news?company=&refresh=   recent news per competitor (Parallel search + Gemini tags)
+    GET  /api/analysis/news?company=&refresh=   top ranked competitor news (Parallel search + Gemini)
     GET  /api/analysis/deepdive/{company}       one competitor's full picture
     GET  /api/analysis/compare?metric=&period=  one metric across companies
     GET  /api/analysis/trend?metric=            one metric over time
     POST /api/analysis/chat                     chat agent, streamed as Server-Sent Events
+    GET/PATCH/DELETE /api/analysis/chat/sessions[/{id}]   saved chats (SQLite)
 
 Everything reads the shared FactStore, which rebuilds itself when a pipeline
 run writes (or a user uploads) a Data Engine - no extra wiring into runs.py.
@@ -22,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from competitor_analysis.analysis import agent as agent_mod
-from competitor_analysis.analysis import deepdive, insights, llm, narrative, news
+from competitor_analysis.analysis import chat_store, deepdive, insights, llm, narrative, news
 from competitor_analysis.analysis import store as S
 from competitor_analysis.analysis import tools as T
 
@@ -100,43 +101,94 @@ def trend(metric: str, entities: list[str] | None = Query(None), period_type: st
     return _guard(T.trend, _store(), metric, entities, period_type, dimension)
 
 
-class ChatMessage(BaseModel):
-    role: str = Field(pattern="^(user|assistant)$")
-    content: str = Field(max_length=20000)
+SESSION_ID = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+    """The server owns the transcript: the client names a session and sends
+    only the new user message."""
+    session_id: str = SESSION_ID
+    message: str = Field(min_length=1, max_length=20000)
     period: str | None = None
+
+
+class RenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
 
 
 def _sse(event, data):
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
+@router.get("/chat/sessions")
+def chat_sessions():
+    return {"sessions": chat_store.list_sessions()}
+
+
+@router.get("/chat/sessions/{session_id}")
+def chat_session(session_id: str):
+    s = chat_store.get_session(session_id)
+    if s is None:
+        raise HTTPException(404, "No such chat.")
+    return s
+
+
+@router.patch("/chat/sessions/{session_id}")
+def chat_rename(session_id: str, req: RenameRequest):
+    if not chat_store.rename(session_id, req.title):
+        raise HTTPException(404, "No such chat.")
+    return {"ok": True}
+
+
+@router.delete("/chat/sessions/{session_id}")
+def chat_delete(session_id: str):
+    if not chat_store.delete(session_id):
+        raise HTTPException(404, "No such chat.")
+    return {"ok": True}
+
+
 @router.post("/chat")
 def chat(req: ChatRequest):
     """Streams: text (deltas), tool_status, chart, table, verification,
     citations, done | error. The agent runs in a worker thread and pushes
-    events through a queue; this generator relays them as they arrive."""
+    events through a queue; this generator relays them as they arrive.
+
+    The session (messages + working-focus state) is persisted in SQLite: the
+    user message is saved before the agent runs so it survives a failure, and
+    the assistant reply, with its charts/citations, once the turn finishes."""
     store = _store()
     try:
         client = llm.get_client()
     except llm.LLMUnavailable as e:
         raise HTTPException(503, f"No LLM configured: {e}")
 
+    prior = chat_store.get_session(req.session_id)
+    history = [{"role": m["role"], "content": m["content"]}
+               for m in (prior["messages"] if prior else []) if m["content"] and not m.get("error")]
+    history.append({"role": "user", "content": req.message})
+    state = prior["state"] if prior else {}
+    chat_store.append_message(req.session_id, "user", req.message)
+
     events = queue.Queue()
-    history = [m.model_dump() for m in req.messages]
 
     def work():
         try:
             out = agent_mod.Agent(store=store, client=client, emit=lambda e, d: events.put((e, d))).run(
-                history, req.period)
+                history, req.period, state)
+            chat_store.append_message(req.session_id, "assistant", out["text"], {
+                "tools": out["tools"], "blocks": out["blocks"],
+                "verification": {"checked": len(out["verification"]["numbers"]),
+                                "unverified": out["verification"]["unverified"]},
+                "citations": out["citations"]})
+            chat_store.set_state(req.session_id, out["state"])
             events.put(("done", {"provider": out["provider"], "model": out["model"]}))
         except (T.ToolError, ValueError) as e:
+            chat_store.append_message(req.session_id, "assistant", "", {"error": str(e)})
             events.put(("error", {"message": str(e)}))
         except Exception as e:  # noqa: BLE001 - surface provider failures to the UI
-            events.put(("error", {"message": f"The model call failed: {str(e)[:300]}"}))
+            msg = f"The model call failed: {str(e)[:300]}"
+            chat_store.append_message(req.session_id, "assistant", "", {"error": msg})
+            events.put(("error", {"message": msg}))
         finally:
             events.put(None)
 

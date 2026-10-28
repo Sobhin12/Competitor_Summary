@@ -151,7 +151,58 @@ def tool_specs():
 # System prompt
 # ---------------------------------------------------------------------------
 
-def system_prompt(store, period=None):
+STATE_MAX_ENTITIES = 5
+STATE_MAX_METRICS = 6
+
+
+def _recent(old, new, limit):
+    """`new` items first (most recent focus), then older ones not repeated."""
+    out = []
+    for x in [*new, *old]:
+        if x and x not in out:
+            out.append(x)
+    return out[:limit]
+
+
+def update_state(state, calls, period=None):
+    """Fold this turn's tool calls into the session's working focus: which
+    companies and metrics the user is looking at and for which period. Rule
+    based on purpose - it can't hallucinate a focus the tools never touched."""
+    ents, mets, per = [], [], None
+    for c in calls:
+        a = c.get("args") or {}
+        for e in [*(a.get("entities") or []), a.get("entity"), a.get("company")]:
+            key = M.entity_key(e) if isinstance(e, str) else None
+            if key and key not in ents:
+                ents.append(key)
+        if isinstance(a.get("metric"), str) and a["metric"] in M.METRICS and a["metric"] not in mets:
+            mets.append(a["metric"])
+        if isinstance(a.get("period"), str) and a["period"]:
+            per = a["period"]
+    state = dict(state or {})
+    state["entities"] = _recent(state.get("entities", []), ents, STATE_MAX_ENTITIES)
+    state["metrics"] = _recent(state.get("metrics", []), mets, STATE_MAX_METRICS)
+    state["period"] = period or per or state.get("period")
+    return state
+
+
+def _state_block(state):
+    if not state or not (state.get("entities") or state.get("metrics") or state.get("period")):
+        return ""
+    lines = []
+    if state.get("entities"):
+        lines.append("- Companies in focus (most recent first): " + ", ".join(state["entities"]))
+    if state.get("metrics"):
+        lines.append("- Metrics in focus (most recent first): " + ", ".join(state["metrics"]))
+    if state.get("period"):
+        lines.append(f"- Period in focus: {state['period']}")
+    return ("\n\nConversation context (what earlier turns were about). Use it to resolve follow-ups such as "
+            "\"their\", \"that metric\" or \"the same for last year\"; the user's latest message wins if it "
+            "names something else. Figures from earlier turns are NOT available - call tools again.\n"
+            + "\n".join(lines))
+
+
+def system_prompt(store, period=None, state=None):
     period = period or store.latest_quarter()
     by_section = {}
     for mid in store.metric_ids():
@@ -192,7 +243,7 @@ Rules:
 
 Known data-quality warnings for {period}:
 {chr(10).join('- ' + c for c in checks) if checks else '- none'}
-Mention a warning when your answer relies on the affected company's figures."""
+Mention a warning when your answer relies on the affected company's figures.{_state_block(state)}"""
 
 
 # ---------------------------------------------------------------------------
@@ -257,15 +308,16 @@ class Agent:
         return False
 
     # -- main loop --------------------------------------------------------------
-    def run(self, history, period=None):
+    def run(self, history, period=None, state=None):
         history = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")][-MAX_HISTORY:]
         if not history or history[-1]["role"] != "user":
             raise ValueError("The last message must be from the user.")
         self.user_numbers = [n["value"] for n in verify.verify(history[-1]["content"], [])["numbers"]]
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
-        system = system_prompt(self.store, T._period(self.store, period) if period else None)
+        system = system_prompt(self.store, T._period(self.store, period) if period else None, state)
         tools = tool_specs()
         answer = []
+        calls = []
 
         for _ in range(MAX_STEPS):
             turn = self.client.complete(system, messages, tools,
@@ -279,6 +331,7 @@ class Agent:
                 answer.append("\n\n")
                 self.emit("text", "\n\n")
             for call in turn.tool_calls:
+                calls.append({"name": call.name, "args": call.args})
                 self.emit("tool_status", {"name": call.name, "args": call.args})
                 try:
                     result = self._run_tool(call.name, call.args)
@@ -305,6 +358,7 @@ class Agent:
         self.emit("verification", {"checked": len(check["numbers"]), "unverified": check["unverified"]})
         self.emit("citations", citations)
         return {"text": text, "blocks": self.blocks, "verification": check, "citations": citations,
+                "tools": calls, "state": update_state(state, calls, period),
                 "provider": self.client.name, "model": self.client.model}
 
     def _citation(self, fid):

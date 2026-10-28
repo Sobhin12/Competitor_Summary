@@ -81,6 +81,7 @@ export default function App() {
   // Chat lives here, not in ChatView, so a conversation survives switching
   // views; `chatSeed` carries an "Ask more" question from another view.
   const [chatMessages, setChatMessages] = useState([]);
+  const [chatSessionId, setChatSessionId] = useState(null);
   const [chatSeed, setChatSeed] = useState(null);
   const askInChat = useCallback((text) => {
     setChatSeed({ text, nonce: Date.now() });
@@ -795,6 +796,7 @@ export default function App() {
           {view === "competitors" && <CompetitorsView onAsk={askInChat} />}
           {view === "chat" && (
             <ChatView messages={chatMessages} setMessages={setChatMessages}
+                      sessionId={chatSessionId} setSessionId={setChatSessionId}
                       seed={chatSeed} onSeedUsed={() => setChatSeed(null)} />
           )}
         </main>

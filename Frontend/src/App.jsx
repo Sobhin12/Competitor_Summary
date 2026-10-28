@@ -7,11 +7,13 @@ import { HighlightsView } from "./highlights.jsx";
 import { CompetitorsView } from "./competitors.jsx";
 import { ChatView } from "./chat.jsx";
 import { NewsView } from "./news.jsx";
+import { GlanceView } from "./glance.jsx";
 
 // v2 analysis views. They read every Data Engine produced so far (all
 // quarters + FY18 history) through /api/analysis, so they don't use the
 // pipeline's FY/Quarter selector or run controls in the header.
 const ANALYSIS_NAV = [
+  { key: "glance", label: "At a glance", icon: "bell" },
   { key: "highlights", label: "Quarter Highlights", icon: "bell" },
   { key: "competitors", label: "Competitors", icon: "users" },
   { key: "news", label: "News", icon: "fileText" },
@@ -77,7 +79,7 @@ export default function App() {
   const [fyDraft, setFyDraft] = useState("");
   const [fyOptions, setFyOptions] = useState(["FY25-26"]);
   const [quarterOptions, setQuarterOptions] = useState(["Q1", "Q2", "Q3", "Q4"]);
-  const [view, setView] = useState("overview");
+  const [view, setView] = useState("glance");
   // Chat lives here, not in ChatView, so a conversation survives switching
   // views; `chatSeed` carries an "Ask more" question from another view.
   const [chatMessages, setChatMessages] = useState([]);
@@ -791,6 +793,7 @@ export default function App() {
             />
           )}
           {view === "reporting" && <ReportsView state={state} onDownload={downloadReport} />}
+          {view === "glance" && <GlanceView onAsk={askInChat} />}
           {view === "highlights" && <HighlightsView onAsk={askInChat} />}
           {view === "news" && <NewsView />}
           {view === "competitors" && <CompetitorsView onAsk={askInChat} />}

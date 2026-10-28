@@ -137,6 +137,8 @@ export const API = {
   // Read-only views over every Data Engine produced so far (all quarters plus
   // the FY18+ history), independent of the pipeline run selected above.
   getAnalysisMeta: () => request("/analysis/meta"),
+  getBriefing: (period, refresh = false) => request(`/analysis/briefing${q({ period, refresh: refresh || null })}`),
+  getGlance: (period) => request(`/analysis/glance${q({ period })}`),
   getHighlights: (period) => request(`/analysis/highlights${q({ period })}`),
   getNarrative: (period, refresh = false) => request(`/analysis/narrative${q({ period, refresh: refresh || null })}`),
   getDeepDive: (company, period) => request(`/analysis/deepdive/${encodeURIComponent(company)}${q({ period })}`),

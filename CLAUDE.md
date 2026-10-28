@@ -158,6 +158,36 @@ imports `reporting.validate` (`extract_numbers`/`_flatten_numbers`/`_normalize`)
 which does not exist in the repo — this module will raise `ImportError` if
 invoked, and nothing in `runs.py`/`main.py`/`cli.py` calls it yet.
 
+### The "At a glance" executive briefing (`Backend/src/competitor_analysis/analysis/`)
+
+The landing tab for the CEO/CFO. NBHI is the home company and every insight is written from its side; figures are
+year-to-date unless a lens says `basis: quarter` (single-quarter figures, flows only, for quarter-to-quarter analysis -
+never mixed with YTD). There is no human approval step by design: automated gates replace it. Flow:
+`screen.py` (statistical hints) → AI investigates → code verifies → AI challenges → code ranks → AI narrates.
+
+- **`lenses.py`** — the formula evaluator and the only place an insight figure is computed. A restricted `ast`
+  subset (`cur/prior/chg/gr/share/pshare`, arithmetic, comparisons) runs per company over the FactStore, tracks the
+  fact ids behind every number, and rejects unknown metrics, unsafe expressions and non-flow metrics on the quarter
+  basis (`validate_spec`). Early-stage insurers are excluded from peers; a company missing inputs is skipped, not
+  estimated. `lens_seed.py` is a fixed set of eight rule-based lenses, used only as the fallback when no LLM is
+  configured (`GET /api/analysis/glance`).
+- **`briefing.py`** — the AI path (`GET /api/analysis/briefing`, builds in a background thread on first open of a
+  quarter, cached in `artifacts/cache/briefing/` by source fingerprint). The AI's tools are a read-only whitelist plus
+  `test_formula` / `submit_finding` / `dismiss` / `submit_watch`. `submit_finding` re-runs every claim through the
+  evaluator and rejects it if the claim's `check` is false, a number in the text isn't in the results
+  (`verify.py`), a value is implausible (quarantined), or it only restates one metric. A second LLM pass challenges the
+  top findings; ranking is rupee materiality × relevance × confidence × novelty (novelty compares with the previous
+  quarter's cached briefing); the narrator's numbers are verified too. Forward calls (`submit_watch`) are stored and
+  graded automatically next quarter.
+- **Never writes to the Data Engine.** `engine_snapshot()` hashes every Data Engine workbook before and after a run;
+  any difference raises `DataEngineModified` and discards the briefing. `test_briefing.py` asserts this.
+- **Model matters.** The loop needs a strong tool-using model: on Gemini flash-lite it ran but found shallow
+  findings. Set `CHAT_LLM_PROVIDER=anthropic` (+ `ANTHROPIC_API_KEY`, optional `CHAT_LLM_MODEL`) or `databricks`;
+  this also switches the chat tab. Gemini calls are paced to 15 RPM; transient and 429 errors are retried and a failed
+  run keeps the findings verified so far (`BRIEFING_MIN_INTERVAL` overrides the pacing).
+- Frontend: `Frontend/src/glance.jsx` (default view) polls the briefing endpoint every 2s while it builds and shows
+  the live investigation log; it falls back to the lens cards when the LLM is unavailable.
+
 ### Cross-cutting things worth knowing
 
 - **Nothing resolves paths relative to cwd.** Every filesystem location comes

@@ -2,6 +2,8 @@
 
     GET  /api/analysis/meta                     periods, companies, metric catalog, LLM status
     GET  /api/analysis/highlights?period=       rule-based insights + data checks
+    GET  /api/analysis/briefing?period=         AI investigation -> code-verified briefing (background build, cached)
+    GET  /api/analysis/glance?period=           ranked executive lenses (NBHI-first) + position map
     GET  /api/analysis/narrative?period=        LLM executive narrative over those insights
     GET  /api/analysis/news?company=&refresh=   top ranked competitor news (Parallel search + Gemini)
     GET  /api/analysis/deepdive/{company}       one competitor's full picture
@@ -23,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from competitor_analysis.analysis import agent as agent_mod
-from competitor_analysis.analysis import chat_store, deepdive, insights, llm, narrative, news
+from competitor_analysis.analysis import briefing, chat_store, deepdive, insights, lenses, llm, narrative, news
 from competitor_analysis.analysis import store as S
 from competitor_analysis.analysis import tools as T
 
@@ -63,6 +65,20 @@ def meta():
 @router.get("/highlights")
 def highlights(period: str | None = None):
     return _guard(insights.build, _store(), period)
+
+
+@router.get("/glance")
+def glance(period: str | None = None):
+    """Executive 'At a glance': ranked second-order lenses, written from NBHI's side."""
+    return _guard(lenses.build, _store(), period)
+
+
+@router.get("/briefing")
+def briefing_route(period: str | None = None, refresh: bool = False):
+    """AI-investigated executive briefing. Builds itself in the background the first
+    time a quarter is opened (or on refresh=true) and is then served from cache:
+    {status: ready|running|error|unavailable, briefing | events | error}."""
+    return _guard(briefing.status, _store(), period, refresh)
 
 
 @router.get("/narrative")

@@ -78,6 +78,16 @@ ATTEMPT_LOG: dict[str, dict] = {}
 # a route that only receives the saved path can still cache the URL's template.
 WINNING_URL: dict[str, str] = {}
 
+# Cancelled candidate downloads still winding down; held so they aren't garbage
+# collected before their temp-file cleanup callback runs.
+_BACKGROUND_TASKS: set = set()
+
+# Candidates are hedged, not fired all at once: candidate N+1 starts when N has
+# finished (a quick failure) or after this many seconds, whichever is first.
+# Eight simultaneous downloads share one link, so a correct 14MB Star PDF that
+# takes ~16-33s alone took 60-130s while junk NSE/BSE results competed with it.
+CANDIDATE_STAGGER_SECONDS = 20.0
+
 # Browser-like headers so Cloudflare/AWS WAF on the insurer domains doesn't 403/406
 # the actual file download (see "Web Application Firewall Protections" in the brief).
 BROWSER_HEADERS = {
@@ -116,6 +126,16 @@ DOWNLOAD_CHUNK_BYTES = 256 * 1024
 # extraction, which already has its own worker/memory tuning
 # (PDF_PARSE_MAX_WORKERS, MEMORY_BUDGET_MB).
 MAX_CONCURRENT_DOWNLOADS = 4
+
+# `read` is the longest silence tolerated BETWEEN chunks, not the whole transfer,
+# so a large file that keeps streaming is unaffected. A stalled connection
+# (seen with a Star Health CDN PDF: first attempt hung the full 60s, the retry
+# then finished in 4s) is cut after 20s so the retry starts sooner.
+DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0, read=20.0)
+
+# The listing-page scrape is only a shortcut ahead of the agent; a portal that
+# is slow or builds its links with JavaScript should cost seconds, not 20+.
+LISTING_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 def _ssl_context() -> ssl.SSLContext | bool:
@@ -683,7 +703,7 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
     headers = {**BROWSER_HEADERS, "Referer": referer}
     magic = FILE_MAGIC[ext]
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=headers,
+    async with httpx.AsyncClient(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT, headers=headers,
                                    verify=_ssl_context()) as http_client:
         for attempt in range(1, 3):
             try:
@@ -806,7 +826,7 @@ async def scrape_listing_links(url: str, cal_data: dict, fy: str, quarter: str) 
     plain server-rendered portals in a second or two with no agent; a portal
     that builds its links with JavaScript yields nothing and falls through to
     the agent, as before."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20, verify=_ssl_context(),
+    async with httpx.AsyncClient(follow_redirects=True, timeout=LISTING_TIMEOUT, verify=_ssl_context(),
                                  headers={**BROWSER_HEADERS, "Accept": "text/html,*/*;q=0.8"}) as c:
         resp = await c.get(url)
         resp.raise_for_status()
@@ -886,7 +906,10 @@ async def try_candidates_concurrently(company_key: str, candidate_urls: list[str
     ext = file_type.lower()
     final_name = cfg.download_filename(company_key, ext)
 
+    gates = [asyncio.Event() for _ in candidate_urls]
+
     async def attempt(i, cand):
+        await gates[i].wait()
         try:
             return await download_file(
                 company_key, cand, file_type, target_dir, referer=referer,
@@ -895,17 +918,47 @@ async def try_candidates_concurrently(company_key: str, candidate_urls: list[str
             log.warning("[%s] Candidate %s errored: %s", company_key, cand, e)
             return None
 
-    results = await asyncio.gather(
-        *[attempt(i, c) for i, c in enumerate(candidate_urls)])
+    # All candidates download concurrently, but they are consumed in RANK order:
+    # the moment candidate i validates and every higher-ranked candidate has
+    # already failed, nothing left can outrank it, so it wins and the rest are
+    # cancelled. Waiting for all of them (gather) let one hung low-ranked
+    # download - two 60s timeouts - hold up a correct rank-0 file that had
+    # validated half a minute in.
+    tasks = [asyncio.create_task(attempt(i, c)) for i, c in enumerate(candidate_urls)]
 
+    async def launcher():
+        for gate, task in zip(gates, tasks):
+            gate.set()
+            await asyncio.wait({task}, timeout=CANDIDATE_STAGGER_SECONDS)
+
+    launcher_task = asyncio.create_task(launcher())
     winner = None
-    for cand, path in zip(candidate_urls, results):
-        if path is None:
-            continue
-        if winner is None:
-            winner = (path, cand)
-        else:
-            path.unlink(missing_ok=True)  # validated, but out-ranked
+    winner_task = None
+    try:
+        for cand, task in zip(candidate_urls, tasks):
+            path = await task
+            if path is not None:
+                winner, winner_task = (path, cand), task
+                break
+    finally:
+        launcher_task.cancel()
+        # Do NOT await the losers. Cancelling a download stalled inside httpx
+        # does not complete promptly (connection teardown waits on the dead
+        # peer), and awaiting it held a company with a validated rank-0 file
+        # for another ~45s. Cancel, and let each one remove its own temp file
+        # when it finally ends.
+        for i, t in enumerate(tasks):
+            if t is winner_task:
+                continue
+            temp = target_dir / f".{final_name}.cand{i}"
+            if t.done():
+                temp.unlink(missing_ok=True)  # validated-but-out-ranked, or failed
+                continue
+            t.cancel()
+            _BACKGROUND_TASKS.add(t)
+            t.add_done_callback(
+                lambda done, temp=temp: (_BACKGROUND_TASKS.discard(done),
+                                         temp.unlink(missing_ok=True)))
     if winner is None:
         return None
     path, cand = winner

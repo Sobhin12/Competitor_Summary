@@ -805,3 +805,102 @@ def test_ssl_falls_back_to_certifi_default_if_truststore_breaks(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", no_truststore)
     assert scraper._ssl_context() is True  # httpx's verified default, not False
+
+
+def test_best_candidate_returns_without_waiting_for_a_hung_lower_one(tmp_path, monkeypatch):
+    """Live Star run: the correct rank-0 PDF validated ~30s in, but the company
+    finished ~2 minutes later because a junk rank-N download was still timing
+    out. Once nothing above a validated candidate is pending, it must win."""
+    async def fake_download(company_key, download_url, file_type, target_dir,
+                            referer, cal_data, dest_name=None):
+        path = target_dir / dest_name
+        if download_url.endswith("hang.pdf"):
+            path.write_bytes(b"partial")      # mid-write when cancelled
+            await asyncio.sleep(30)
+        path.write_bytes(b"%PDF-good")
+        return path
+
+    monkeypatch.setattr(scraper, "download_file", fake_download)
+
+    async def run():
+        return await asyncio.wait_for(scraper.try_candidates_concurrently(
+            "ACME", ["https://a.com/good.pdf", "https://a.com/hang.pdf"], "PDF",
+            tmp_path, referer="https://a.com", cal_data=Q3), timeout=5)
+
+    got = asyncio.run(run())
+    assert got == tmp_path / "ACME.pdf" and got.read_bytes() == b"%PDF-good"
+    assert not list(tmp_path.glob(".*cand*")), "temp candidate files left behind"
+
+
+def test_a_slow_higher_ranked_candidate_still_beats_a_faster_lower_one(tmp_path, monkeypatch):
+    async def fake_download(company_key, download_url, file_type, target_dir,
+                            referer, cal_data, dest_name=None):
+        if download_url.endswith("first.pdf"):
+            await asyncio.sleep(0.3)
+        path = target_dir / dest_name
+        path.write_bytes(download_url.encode())
+        return path
+
+    monkeypatch.setattr(scraper, "download_file", fake_download)
+    got = asyncio.run(scraper.try_candidates_concurrently(
+        "ACME", ["https://a.com/first.pdf", "https://a.com/second.pdf"], "PDF",
+        tmp_path, referer="https://a.com", cal_data=Q3))
+    assert got.read_bytes() == b"https://a.com/first.pdf"
+
+
+def test_stalls_are_cut_quickly_but_large_streams_are_not():
+    """A stalled connection must not burn the full 60s before the retry, and the
+    listing shortcut must stay cheap. `read` bounds the gap between chunks, so a
+    14MB file that keeps streaming is unaffected."""
+    assert scraper.DOWNLOAD_TIMEOUT.read <= 30
+    assert scraper.DOWNLOAD_TIMEOUT.connect <= 15
+    assert scraper.LISTING_TIMEOUT.read <= 15
+
+
+def _staggered(monkeypatch, tmp_path, stagger, behaviour):
+    """Run two candidates through try_candidates_concurrently; `behaviour`
+    maps url -> (delay, path_or_None). Returns (result, start_order)."""
+    started = []
+
+    async def fake_download(company_key, download_url, file_type, target_dir,
+                            referer, cal_data, dest_name=None):
+        started.append(download_url)
+        delay, ok = behaviour[download_url]
+        await asyncio.sleep(delay)
+        if not ok:
+            return None
+        path = target_dir / dest_name
+        path.write_bytes(download_url.encode())
+        return path
+
+    monkeypatch.setattr(scraper, "download_file", fake_download)
+    monkeypatch.setattr(scraper, "CANDIDATE_STAGGER_SECONDS", stagger)
+    got = asyncio.run(scraper.try_candidates_concurrently(
+        "ACME", list(behaviour), "PDF", tmp_path, referer="https://a.com", cal_data=Q3))
+    return got, started
+
+
+def test_lower_candidates_do_not_start_while_the_best_is_downloading(tmp_path, monkeypatch):
+    """The best-ranked candidate keeps the whole link when it succeeds inside
+    the stagger window."""
+    got, started = _staggered(monkeypatch, tmp_path, stagger=5, behaviour={
+        "https://a.com/best.pdf": (0.2, True),
+        "https://a.com/junk.pdf": (0.2, True)})
+    assert started == ["https://a.com/best.pdf"]
+    assert got.read_bytes() == b"https://a.com/best.pdf"
+
+
+def test_next_candidate_starts_immediately_when_the_previous_fails_fast(tmp_path, monkeypatch):
+    got, started = _staggered(monkeypatch, tmp_path, stagger=30, behaviour={
+        "https://a.com/404.pdf": (0.05, False),
+        "https://a.com/good.pdf": (0.05, True)})
+    assert started == ["https://a.com/404.pdf", "https://a.com/good.pdf"]
+    assert got.read_bytes() == b"https://a.com/good.pdf"
+
+
+def test_next_candidate_starts_after_the_stagger_if_the_previous_is_slow(tmp_path, monkeypatch):
+    got, started = _staggered(monkeypatch, tmp_path, stagger=0.1, behaviour={
+        "https://a.com/slow.pdf": (0.6, False),
+        "https://a.com/good.pdf": (0.05, True)})
+    assert started == ["https://a.com/slow.pdf", "https://a.com/good.pdf"]
+    assert got.read_bytes() == b"https://a.com/good.pdf"

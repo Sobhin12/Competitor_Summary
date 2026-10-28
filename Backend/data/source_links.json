@@ -5,30 +5,63 @@
   },
   "Niva Bupa Health Insurance": {
     "name": "Niva Bupa Health Insurance Company Limited",
-    "quarterly_disclosure_page_link": "https://transactions.nivabupa.com/pages/public-disclosures.aspx"
+    "quarterly_disclosure_page_link": "https://transactions.nivabupa.com/pages/public-disclosures.aspx",
+    "aliases": [
+      "Niva Bupa",
+      "Max Bupa"
+    ],
+    "irdai_reg_no": "145"
   },
   "Aditya Birla Health Insurance": {
     "name": "Aditya Birla Health Insurance Co. Limited",
-    "quarterly_disclosure_page_link": "https://www.adityabirlacapital.com/healthinsurance/downloads"
+    "quarterly_disclosure_page_link": "https://www.adityabirlacapital.com/healthinsurance/downloads",
+    "aliases": [
+      "Aditya Birla Health Insurance"
+    ],
+    "irdai_reg_no": "153"
   },
   "Care Health Insurance": {
     "name": "Care Health Insurance Ltd",
-    "quarterly_disclosure_page_link": "https://www.careinsurance.com/public-disclosures.html"
+    "quarterly_disclosure_page_link": "https://www.careinsurance.com/public-disclosures.html",
+    "aliases": [
+      "Care Health Insurance",
+      "Religare Health Insurance"
+    ],
+    "irdai_reg_no": "148"
   },
   "Galaxy Health Insurance": {
     "name": "Galaxy Health Insurance Company Ltd",
-    "quarterly_disclosure_page_link": "https://www.galaxyhealth.com/public-disclosures"
+    "quarterly_disclosure_page_link": "https://www.galaxyhealth.com/public-disclosures",
+    "aliases": [
+      "Galaxy Health Insurance",
+      "Galaxy Health and Allied"
+    ],
+    "irdai_reg_no": "167"
   },
   "ManipalCigna Health Insurance": {
     "name": "ManipalCigna Health Insurance Co Ltd",
-    "quarterly_disclosure_page_link": "https://www.manipalcigna.com/disclosures/public-disclosures"
+    "quarterly_disclosure_page_link": "https://www.manipalcigna.com/disclosures/public-disclosures",
+    "aliases": [
+      "ManipalCigna",
+      "Manipal Cigna",
+      "CignaTTK"
+    ],
+    "irdai_reg_no": "151"
   },
   "Narayana Health Insurance": {
     "name": "Narayana Health Insurance Ltd",
-    "quarterly_disclosure_page_link": "https://www.narayanahealth.insurance/disclosures-report"
+    "quarterly_disclosure_page_link": "https://www.narayanahealth.insurance/disclosures-report",
+    "aliases": [
+      "Narayana Health Insurance"
+    ]
   },
   "Star Health & Allied Insurance": {
     "name": "Star Health & Allied Insurance Co Ltd",
-    "quarterly_disclosure_page_link": "https://www.starhealth.in/media-center/"
+    "quarterly_disclosure_page_link": "https://www.starhealth.in/media-center/",
+    "aliases": [
+      "Star Health and Allied Insurance",
+      "Star Health & Allied"
+    ],
+    "irdai_reg_no": "129"
   }
 }

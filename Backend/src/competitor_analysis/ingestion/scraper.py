@@ -2,9 +2,11 @@ import os
 import json
 import re
 import asyncio
+import ssl
 from collections import Counter
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from html import unescape
+from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 import aiofiles
@@ -33,18 +35,16 @@ client = AsyncParallel(api_key=os.getenv("PARALLEL_API_KEY"))
 # https://docs.parallel.ai/task-api/guides/choose-a-processor
 PROCESSOR = "core"
 
-# Per-processor wall-clock budget for task_run.result(). These are deliberately
-# tight: a single global 30-minute ceiling meant one hung "core" run blocked the
-# next processor for half an hour, which dominated Phase 1's runtime. A run that
-# hasn't resolved a link within its budget is far more likely stuck than slow,
-# so we cut it and escalate instead of waiting. Uniformly 60s across every
-# tier (including Search, below) so the reviewer is reached fast; the
-# tradeoff is that a company which would have resolved with more patience
-# (especially via "pro") now more often lands on the reviewer as "missing"
-# instead of resolving automatically - re-tune per KNOWN_ISSUES/run logs if
-# that tradeoff turns out too aggressive in practice.
-PROCESSOR_TIMEOUTS = {"core": 60, "pro": 60, "ultra": 60}
-DEFAULT_PROCESSOR_TIMEOUT = 60
+# Per-processor wall-clock budget for task_run.result(). A single global
+# 30-minute ceiling once let one hung "core" run block the next processor for
+# half an hour, so budgets are bounded - but they must also be long enough for a
+# browsing agent to actually finish. At 60s a normal "core"/"pro" run was cut off
+# while still working (and still billing server-side), escalated, and then
+# failed again, leaving the Search branch to win. The agent is now a fallback
+# behind cached URLs and the listing-page scrape, so paying for patience only on
+# the rare company that reaches it is the right trade.
+PROCESSOR_TIMEOUTS = {"core": 180, "pro": 300, "ultra": 600}
+DEFAULT_PROCESSOR_TIMEOUT = 180
 
 # Escalation ladder, cheapest first. "ultra" is deliberately NOT here: it costs
 # materially more than core/pro and, being the third sequential attempt, it also
@@ -73,6 +73,10 @@ URL_PATTERNS_FILE = paths.URL_PATTERNS_FILE
 # this is what tells you which processors actually earn their place in the
 # ladder and which never win.
 ATTEMPT_LOG: dict[str, dict] = {}
+
+# The candidate URL that try_candidates_concurrently last saved per company, so
+# a route that only receives the saved path can still cache the URL's template.
+WINNING_URL: dict[str, str] = {}
 
 # Browser-like headers so Cloudflare/AWS WAF on the insurer domains doesn't 403/406
 # the actual file download (see "Web Application Firewall Protections" in the brief).
@@ -113,6 +117,23 @@ DOWNLOAD_CHUNK_BYTES = 256 * 1024
 # (PDF_PARSE_MAX_WORKERS, MEMORY_BUDGET_MB).
 MAX_CONCURRENT_DOWNLOADS = 4
 _download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
+def _ssl_context() -> ssl.SSLContext | bool:
+    """TLS trust for downloads, with verification ON.
+
+    Some insurer hosts (Aditya Birla's adityabirlacapital.com and
+    adityabirlahealthinsurance.com) serve a chain that the operating system
+    accepts but httpx's bundled certifi store rejects ("unable to get local
+    issuer certificate"), which made retrieval fail for that company. Trusting
+    the OS store fixes it without weakening verification. Falls back to the
+    certifi default if truststore is unavailable."""
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception as e:  # ImportError, or a platform truststore can't support
+        log.warning("truststore unavailable (%s); using the bundled CA store.", e)
+        return True
+
 
 MONTH_ABBREV = {
     "january": "jan", "february": "feb", "march": "mar", "april": "apr",
@@ -193,6 +214,10 @@ def _period_tokens(cal_data: dict, quarter: str) -> list[tuple[str, str]]:
     ]
 
 
+_OPAQUE_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
 def templatize_url(url: str, cal_data: dict, quarter: str) -> str | None:
     """Turn a working URL into a period-parameterised template, or None if it
     cannot safely be one.
@@ -206,7 +231,12 @@ def templatize_url(url: str, cal_data: dict, quarter: str) -> str | None:
         return None
     parts = urlsplit(url)
     path = parts.path
+    # A document-store id (e.g. a Liferay UUID) names one specific upload, so a
+    # URL carrying one can never be re-rendered for another period.
+    if _OPAQUE_ID_RE.search(path):
+        return None
     replaced = False
+    month_replaced = False
     for literal, placeholder in _period_tokens(cal_data, quarter):
         if not literal:
             continue
@@ -214,6 +244,16 @@ def templatize_url(url: str, cal_data: dict, quarter: str) -> str | None:
         if pattern.search(path):
             path = pattern.sub(placeholder, path)
             replaced = True
+            month_replaced = month_replaced or placeholder in ("{month}", "{mon}")
+    # "Disclosure-December-25.pdf": a 2-digit year is only safe to templatise when
+    # it is delimited on both sides AND sits in a path that also named the month,
+    # otherwise "-25" could be any number. Left hardcoded it makes the cached
+    # URL unusable next year.
+    if month_replaced:
+        yy = str(cal_data["year"])[-2:]
+        yy_re = re.compile(rf"(?<=[-_'])({yy})(?=[._/\-]|$)")
+        if yy_re.search(path):
+            path = yy_re.sub("{yy}", path)
     if not replaced:
         return None
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
@@ -237,6 +277,7 @@ def render_url_template(template: str, cal_data: dict, quarter: str) -> list[str
                     .replace("{mon}", mon_form)
                     .replace("{quarter}", q_form)
                     .replace("{year}", str(year))
+                    .replace("{yy}", str(year)[-2:])
                     .replace("{fy_short}", f"{str(year)[-2:]}-{str(year + 1)[-2:]}")
                     .replace("{fy_label}", f"{year}-{str(year + 1)[-2:]}"))
         if rendered not in variants:
@@ -308,7 +349,8 @@ def build_output_schema(file_type: str) -> dict:
     }
 
 
-def build_objective(company_key: str, url: str, cal_data: dict, fy: str) -> tuple[str, str]:
+def build_objective(company_key: str, url: str, cal_data: dict, fy: str,
+                    company: dict | None = None) -> tuple[str, str]:
     is_gic = company_key == "GIC"
     file_type = "XLSX" if is_gic else "PDF"
 
@@ -332,8 +374,12 @@ def build_objective(company_key: str, url: str, cal_data: dict, fy: str) -> tupl
         # From the FY itself, not the quarter's calendar year - see cfg.fy_label.
         label = cfg.fy_label(fy)
         label_long = cfg.fy_label_long(fy)
+        legal = (company or {}).get("name") or company_key
+        reg = (company or {}).get("irdai_reg_no")
+        identity = legal + (f" (IRDAI registration no. {reg})" if reg else "")
         objective = (
-            f"Go to {url}, the public disclosures page for this insurer. Find the "
+            f"Go to {url}, the public disclosures page for {identity}. Only a document "
+            f"published by this exact insurer counts - not a peer's or its parent's. Find the "
             f"Quarterly Public Disclosure document for Financial Year {label} "
             f"(also written {label_long}), the "
             f"quarter ending {cal_data['month']} {cal_data['year']}. If the page has a "
@@ -349,12 +395,13 @@ def build_objective(company_key: str, url: str, cal_data: dict, fy: str) -> tupl
 
 async def resolve_download_url(
     company_key: str, url: str, cal_data: dict, processor: str, fy: str,
-    feedback: str | None = None
+    feedback: str | None = None, company: dict | None = None
 ) -> tuple[dict | None, str]:
-    objective, file_type = build_objective(company_key, url, cal_data, fy)
+    objective, file_type = build_objective(company_key, url, cal_data, fy, company)
     if feedback:
         objective += " " + feedback
     domain = urlparse(url).netloc
+    domains = [domain] + [d for d in (company or {}).get("allowed_domains", []) if d != domain]
 
     task_run = await client.task_run.create(
         input=objective,
@@ -362,7 +409,7 @@ async def resolve_download_url(
         task_spec={"output_schema": build_output_schema(file_type)},
         # Keep the agent on the insurer's own domain instead of wandering the web.
         # https://docs.parallel.ai (SourcePolicy.include_domains)
-        source_policy={"include_domains": [domain]},
+        source_policy={"include_domains": domains},
     )
     budget = PROCESSOR_TIMEOUTS.get(processor, DEFAULT_PROCESSOR_TIMEOUT)
     log.info("[%s] Task submitted (run_id=%s, processor=%s, budget=%ds), waiting for result...",
@@ -417,10 +464,29 @@ def extract_lead_text(path: Path, ext: str, pages: int = VALIDATION_PAGES) -> st
             out.append(page.extract_text() or "")
         return "\n".join(out)
     if ext == "xlsx":
-        wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
-        first_row = next(wb.active.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        # Open the handle ourselves: openpyxl refuses a path whose extension isn't
+        # .xlsx, and candidates are saved under temp names like ".GIC.xlsx.cand0".
+        with open(path, "rb") as fh:
+            wb = openpyxl.load_workbook(fh, data_only=True, read_only=True)
+            first_row = next(wb.active.iter_rows(min_row=1, max_row=1, values_only=True), ())
         return " ".join(str(c) for c in first_row if c)
     return ""
+
+
+def _period_regexes(month: str, year: str):
+    mon = MONTH_ABBREV[month]
+    yy = year[-2:]
+    mnum = _MONTH_NUMBER[month]
+    # "June 2026", "30th JUNE , 2026", "period ended June 30, 2026". A bare
+    # 2-digit year is NOT allowed here: "December 25, 2024" would otherwise read
+    # as December 2025.
+    named = re.compile(
+        rf"\b({month}|{mon})\b[^0-9A-Za-z]{{0,4}}(\d{{1,2}}[^0-9A-Za-z]{{0,4}})?{year}\b", re.I)
+    # "Jun-26", "Dec'25" - the 2-digit year must follow a delimiter directly.
+    short = re.compile(rf"\b({month}|{mon})\s?[-'’/]\s?{yy}\b", re.I)
+    # "30/06/2026", "30-6-26"
+    numeric = re.compile(rf"\b\d{{1,2}}[/-]0?{mnum}[/-]({year}|{yy})\b")
+    return named, short, numeric
 
 
 def _mentions_period(text: str, cal_data: dict) -> bool:
@@ -432,47 +498,124 @@ def _mentions_period(text: str, cal_data: dict) -> bool:
     documents that cover an entirely different period."""
     month = cal_data["month"].lower()
     year = str(cal_data["year"])
-    yy = year[-2:]
-    mon = MONTH_ABBREV[month]
-    mnum = _MONTH_NUMBER[month]
+    return any(rx.search(text) for rx in _period_regexes(month, year))
 
-    # "June 2026", "30th JUNE , 2026", "Jun-26", "period ended June 30, 2026"
-    named = re.compile(
-        rf"\b({month}|{mon})\b[^0-9A-Za-z]{{0,4}}(\d{{1,2}}[^0-9A-Za-z]{{0,4}})?({year}|{yy})\b",
-        re.I)
-    # "30/06/2026", "30-6-26"
-    numeric = re.compile(rf"\b\d{{1,2}}[/-]0?{mnum}[/-]({year}|{yy})\b")
-    return bool(named.search(text) or numeric.search(text))
+
+_MONTH_ALT = "|".join(sorted(
+    list(_MONTH_NUMBER) + list(MONTH_ABBREV.values()) + ["sept"], key=len, reverse=True))
+
+# "for the quarter ended 30th June, 2026", "Up to the period ended Dec 31, 2025",
+# "FOR THE YEAR ENDED MARCH 31, 2025" - the statement a filing's cover/header
+# makes about the period it covers, as opposed to a comparative column or a
+# date mentioned in passing.
+_STATED_PERIOD_RE = re.compile(
+    rf"(?:period|quarter|year|months?)\s+(?:ended|ending|upto|up\s+to)\s*[:\-]?\s*(?:the\s+)?"
+    rf"(?:(?P<d1>\d{{1,2}})(?:st|nd|rd|th)?[\s\-./,]*(?P<m1>{_MONTH_ALT})[\s\-./,']*(?P<y1>\d{{4}})"
+    rf"|(?P<m2>{_MONTH_ALT})\.?[\s\-./,]*(?:\d{{1,2}}(?:st|nd|rd|th)?[\s\-./,]*)?(?P<y2>\d{{4}}))",
+    re.I)
+
+
+def _month_number(token: str) -> int:
+    return _MONTH_NUMBER[next(m for m in _MONTH_NUMBER if m.startswith(token.lower()[:3]))]
+
+
+def _stated_period(text: str) -> tuple[int, int] | None:
+    """(month, year) of the FIRST 'period/quarter/year ended <date>' statement."""
+    m = _STATED_PERIOD_RE.search(text)
+    if not m:
+        return None
+    month = m.group("m1") or m.group("m2")
+    year = m.group("y1") or m.group("y2")
+    return _month_number(month), int(year)
+
+
+def _period_is_stated_first(text: str, cal_data: dict) -> bool:
+    """The first period the document says it covers must be the target.
+
+    Filings carry comparatives and cite other dates, so merely mentioning the
+    target quarter-end somewhere (what `_mentions_period` tests) also passes a
+    different quarter's filing. Counting mentions does not separate them either
+    - current and prior-year columns appear about equally often - so use the
+    header statement. A document with no such statement is not rejected here;
+    `_mentions_period` already vouched for it."""
+    stated = _stated_period(text)
+    if stated is None:
+        return True
+    return stated == (_MONTH_NUMBER[cal_data["month"].lower()], int(cal_data["year"]))
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower().replace("&", " and "))
+
+
+def _company_entry(company_key: str) -> dict | None:
+    try:
+        return load_sources().get(company_key)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _mentions_company(text: str, company: dict) -> bool:
+    """Whether `text` names this insurer (any alias) or carries its IRDAI
+    registration number."""
+    norm = _norm(text)
+    for alias in company.get("aliases", []):
+        if _norm(alias) in norm:
+            return True
+    reg = company.get("irdai_reg_no")
+    if reg and re.search(
+            rf"reg(?:istration|n)?\.?\s*(?:no\.?|number)?\s*[:\-]?\s*{re.escape(str(reg))}\b",
+            norm):
+        return True
+    return False
 
 
 def validate_document(path: Path, ext: str, cal_data: dict, company_key: str) -> bool:
-    """Confirm the downloaded file is the right DOCUMENT for the right PERIOD,
-    not merely a well-formed PDF/XLSX that happens to mention the date.
+    """Confirm the downloaded file is the right COMPANY's right DOCUMENT for the
+    right PERIOD, not merely a well-formed PDF/XLSX that happens to mention the
+    date.
 
-    Two independent checks, because each alone lets real mistakes through:
+    Independent checks, because each alone lets real mistakes through:
 
       * period  - catches an insurer reusing or mislabelling a stale file
                   under the current quarter's link (seen with Galaxy Health,
-                  whose "Q3"-named asset contained Sep-30 content).
+                  whose "Q3"-named asset contained Sep-30 content). The first
+                  "period ended ..." statement must also be the target, so a
+                  filing for another quarter that merely cites the target
+                  date as a comparative fails.
       * form    - catches a right-period file that isn't the disclosure at
                   all. A period-only check accepted Aditya Birla *Capital*'s
                   quarterly results, a Star Health covering letter to BSE,
                   and an unrelated third-party PDF from web search - all of
                   which mention the quarter-end date somewhere.
+      * company - every insurer's disclosure has the same FORM NL layout, so a
+                  Care Health filing found by Search passes both checks above
+                  when asked for Star Health. Needs "aliases"/"irdai_reg_no" in
+                  source_links.json; skipped for a company without them.
     """
     try:
         text = extract_lead_text(path, ext)
     except Exception as e:
-        log.warning("[validate] Could not read %s to verify it: %s", path.name, e)
-        return True  # don't block on a parser issue we can't attribute to content
+        # Unreadable is unverifiable: accepting it is how a wrong file used to
+        # slip through, so refuse it and let the next candidate/attempt run.
+        log.warning("[%s] Rejected %s: could not read it to verify (%s).",
+                    company_key, path.name, e)
+        return False
 
     if not _mentions_period(text, cal_data):
         log.warning("[%s] Rejected %s: does not state the period %s %s.",
                     company_key, path.name, cal_data["month"], cal_data["year"])
         return False
 
+    if not _period_is_stated_first(text, cal_data):
+        log.warning("[%s] Rejected %s: mentions %s %s but its header covers a different "
+                    "period (likely another quarter's filing).",
+                    company_key, path.name, cal_data["month"], cal_data["year"])
+        return False
+
     # The GIC workbook is a statistics table, not a disclosure bundle, so the
-    # form check doesn't apply to it - its title row already names the period.
+    # form and company checks don't apply to it - its title row already names
+    # the period.
     if ext == "xlsx":
         return True
 
@@ -481,6 +624,14 @@ def validate_document(path: Path, ext: str, cal_data: dict, company_key: str) ->
                     "so this is not an IRDAI public disclosure (wrong document, right date).",
                     company_key, path.name, VALIDATION_PAGES)
         return False
+
+    company = _company_entry(company_key)
+    if company and (company.get("aliases") or company.get("irdai_reg_no")):
+        if not _mentions_company(text, company):
+            log.warning("[%s] Rejected %s: does not name this insurer (no alias or IRDAI "
+                        "registration number found) - likely another company's filing.",
+                        company_key, path.name)
+            return False
     return True
 
 
@@ -532,7 +683,8 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
     headers = {**BROWSER_HEADERS, "Referer": referer}
     magic = FILE_MAGIC[ext]
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=headers) as http_client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=headers,
+                                   verify=_ssl_context()) as http_client:
         for attempt in range(1, 3):
             try:
                 content = await _fetch_bounded(http_client, download_url, magic, file_type,
@@ -551,13 +703,13 @@ async def download_file(company_key: str, download_url: str, file_type: str, tar
                 await f.write(content)
 
             if not validate_document(dest, ext, cal_data, company_key):
-                log.warning("[%s] Discarded %s from %s (attempt %d/2).",
-                            company_key, file_type, download_url, attempt)
+                log.warning("[%s] Discarded %s from %s.",
+                            company_key, file_type, download_url)
                 dest.unlink(missing_ok=True)
-                if attempt == 2:
-                    return None
-                await asyncio.sleep(2)
-                continue
+                # Terminal, not retried: a fully downloaded file that is the wrong
+                # company/period/document will be the same wrong file next time,
+                # and re-fetching it doubled the cost of every wrong candidate.
+                return None
 
             log.info("[%s] Saved -> %s", company_key, dest)
             return dest
@@ -588,7 +740,81 @@ def gic_deterministic_url(cal_data: dict) -> str:
     )
 
 
-async def search_fallback(company_key: str, cal_data: dict, quarter: str, file_type: str, fy: str) -> list[str]:
+_ANCHOR_RE = re.compile(
+    r"<a\b[^>]*?\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+# Documents on a disclosures page that are not the quarterly disclosure bundle.
+_LISTING_NEGATIVE = ("stewardship", "voting", "annual report", "presentation",
+                     "press", "brochure", "prospectus", "newsletter", "results",
+                     "policy wording", "proxy")
+
+
+def score_listing_link(href: str, text: str, cal_data: dict, fy: str, quarter: str) -> int:
+    """How likely an <a> on a disclosures page is this period's disclosure PDF.
+    0 means "not a candidate". The score only ORDERS candidates; every one is
+    still downloaded and passed through validate_document."""
+    path = urlsplit(href).path.lower()
+    if not path.endswith(".pdf"):
+        return 0
+    blob = (unquote(href) + " " + text).lower()
+    month = cal_data["month"].lower()
+    abbrev = MONTH_ABBREV[month]
+    year = str(cal_data["year"])
+    q = quarter.lower()
+    score = 0
+    has_period = False
+    if re.search(rf"(?<![a-z]){month}(?![a-z])", blob):
+        score += 4
+        has_period = True
+    elif re.search(rf"(?<![a-z]){abbrev}(?![a-z])", blob):
+        score += 3
+        has_period = True
+    if re.search(rf"(?<![a-z0-9]){q}(?![0-9])", blob.replace("_", " ").replace("-", " ")):
+        score += 3
+        has_period = True
+    if not has_period:
+        return 0
+    if year in blob:
+        score += 2
+    if (cfg.fy_label(fy) in blob or cfg.fy_label_long(fy) in blob
+            or f"fy {str(cal_data['year'])[-2:]}" in blob):
+        score += 2
+    if "disclosure" in blob:
+        score += 1
+    if any(neg in blob for neg in _LISTING_NEGATIVE):
+        score -= 5
+    return max(score, 0)
+
+
+def extract_listing_links(html: str, base_url: str, cal_data: dict, fy: str,
+                          quarter: str, limit: int = 5) -> list[str]:
+    """Best-scoring PDF links on a disclosures page, best first, absolute."""
+    best: dict[str, int] = {}
+    for href, inner in _ANCHOR_RE.findall(html):
+        href = unescape(href).strip()
+        text = unescape(_TAG_RE.sub(" ", inner))
+        absolute = urljoin(base_url, href)
+        score = score_listing_link(absolute, text, cal_data, fy, quarter)
+        if score > best.get(absolute, 0):
+            best[absolute] = score
+    ranked = sorted(best.items(), key=lambda kv: -kv[1])
+    return [u for u, _ in ranked[:limit]]
+
+
+async def scrape_listing_links(url: str, cal_data: dict, fy: str, quarter: str) -> list[str]:
+    """Fetch the disclosures page directly and rank its PDF links. Resolves
+    plain server-rendered portals in a second or two with no agent; a portal
+    that builds its links with JavaScript yields nothing and falls through to
+    the agent, as before."""
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20, verify=_ssl_context(),
+                                 headers={**BROWSER_HEADERS, "Accept": "text/html,*/*;q=0.8"}) as c:
+        resp = await c.get(url)
+        resp.raise_for_status()
+        return extract_listing_links(resp.text, str(resp.url), cal_data, fy, quarter)
+
+
+async def search_fallback(company_key: str, cal_data: dict, quarter: str, file_type: str, fy: str,
+                          company: dict | None = None) -> list[str]:
     """Last resort when the Task agent can't resolve a link from the listing page
     itself (JS-tab-gated content, or the period isn't on the visible page at all):
     query Parallel's Search API, which draws on indexed/crawled web content rather
@@ -603,18 +829,30 @@ async def search_fallback(company_key: str, cal_data: dict, quarter: str, file_t
             "gicouncil.in segmentwise report download",
         ]
     else:
+        # Full legal name (and registration number) rather than the config key,
+        # so results are this insurer's filing and not a peer's or a news item.
+        legal = (company or {}).get("name") or company_key
+        reg = (company or {}).get("irdai_reg_no")
+        who = f"{legal} (IRDAI registration {reg})" if reg else legal
         objective = (
-            f"Direct PDF download link for {company_key}'s quarterly public disclosure "
-            f"for the quarter ended {cal_data['month']} {cal_data['year']} ({quarter})"
+            f"Direct PDF download link for {who}'s quarterly public disclosure "
+            f"(IRDAI FORM NL schedules) for the quarter ended {cal_data['month']} {cal_data['year']} ({quarter})"
         )
         queries = [
-            f"{company_key} public disclosure {cal_data['month']} {cal_data['year']} pdf",
-            f"{company_key} {quarter} FY {cfg.fy_label(fy)} public disclosure pdf",
+            f"{legal} public disclosure quarter ended {cal_data['month']} {cal_data['year']} pdf",
+            f"{legal} {quarter} FY {cfg.fy_label(fy)} public disclosure pdf",
         ]
 
     log.info("[%s] Querying Search API...", company_key)
+    kwargs = {}
+    # Opt-in per company ("allowed_domains" in source_links.json): the insurer's
+    # own domain plus any CDN it publishes on. Unset keeps Search unrestricted,
+    # because some filings live on an unrelated CDN host.
+    allowed = (company or {}).get("allowed_domains")
+    if allowed:
+        kwargs["advanced_settings"] = {"source_policy": {"include_domains": list(allowed)}}
     result = await asyncio.wait_for(
-        client.search(objective=objective, search_queries=queries),
+        client.search(objective=objective, search_queries=queries, **kwargs),
         timeout=SEARCH_TIMEOUT_SECONDS,
     )
     # Don't filter by the insurer's own domain here: disclosure PDFs are often
@@ -671,6 +909,7 @@ async def try_candidates_concurrently(company_key: str, candidate_urls: list[str
     if winner is None:
         return None
     path, cand = winner
+    WINNING_URL[company_key] = cand
     final = target_dir / final_name
     path.replace(final)
     log.info("[%s] Saved -> %s (from %s)", company_key, final, cand)
@@ -696,10 +935,17 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
     # ---- Step 0: skip entirely if this period's file is already on disk ----
     dest = target_dir / final_name
     if dest.exists():
-        record("already-downloaded")
-        log.info("[%s] %s already present for %s %s - retrieval done, skipping agent dispatch.",
-                  company_key, final_name, quarter, fy)
-        return
+        if validate_document(dest, ext, cal_data, company_key):
+            record("already-downloaded")
+            log.info("[%s] %s already present for %s %s - retrieval done, skipping agent dispatch.",
+                      company_key, final_name, quarter, fy)
+            return
+        # A wrong file saved by an earlier run would otherwise be trusted forever.
+        rejected = dest.with_name(dest.name + ".rejected")
+        rejected.unlink(missing_ok=True)
+        dest.replace(rejected)
+        log.warning("[%s] Existing %s failed validation; moved to %s and re-fetching.",
+                    company_key, final_name, rejected.name)
 
     # ---- Step 1: cheap deterministic attempts, before any agent is billed ----
     # A cached pattern from a previous quarter, or GIC's known fixed path. Both
@@ -722,6 +968,29 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
             return
         log.info("[%s] No direct URL worked; falling back to the agent.", company_key)
 
+    # ---- Step 1b: read the listing page ourselves before billing an agent ----
+    # Server-rendered portals expose the PDF link in plain HTML. Candidates are
+    # ranked by period tokens and each is still fully validated.
+    if not is_gic and url:
+        try:
+            links = await scrape_listing_links(url, cal_data, fy, quarter)
+        except Exception as e:
+            log.info("[%s] Listing-page scrape unavailable (%s); falling back to the agent.",
+                     company_key, e)
+            links = []
+        if links:
+            log.info("[%s] Listing page offered %d candidate link(s); validating...",
+                     company_key, len(links))
+            dest = await try_candidates_concurrently(
+                company_key, links, file_type, target_dir, referer=url, cal_data=cal_data)
+            if dest is not None:
+                winner = WINNING_URL.get(company_key)
+                if winner:
+                    save_url_pattern(company_key, winner, cal_data, quarter)
+                record("listing-scrape")
+                return
+            log.info("[%s] No listing-page link validated; falling back to the agent.", company_key)
+
     ladder = ladder_for(data)
 
     async def run_processor(processor: str, feedback: str | None, dest_name: str | None = None):
@@ -731,7 +1000,7 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
         so it cannot interleave with the Search branch promoting its own temp
         file to the same path; the winner is promoted by the caller."""
         content, resolved_file_type = await resolve_download_url(
-            company_key, url, cal_data, processor, fy, feedback)
+            company_key, url, cal_data, processor, fy, feedback, data)
         if content is None:
             return None, None
         path = await download_file(company_key, content["download_url"], resolved_file_type,
@@ -740,7 +1009,7 @@ async def process_company(company_key: str, data: dict, fy: str, quarter: str, t
         return path, content
 
     async def run_search():
-        candidates = await search_fallback(company_key, cal_data, quarter, file_type, fy)
+        candidates = await search_fallback(company_key, cal_data, quarter, file_type, fy, data)
         return await try_candidates_concurrently(
             company_key, candidates, file_type, target_dir, referer=url, cal_data=cal_data)
 

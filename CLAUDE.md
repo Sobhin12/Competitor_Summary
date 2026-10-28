@@ -79,6 +79,12 @@ constant almost always needs this too.
    Search API fallback; successful URLs are cached as period-parameterised
    templates so later quarters often skip the agent. Never blocks Phase 2 — a
    missing insurer is skipped, not fatal.
+   Resolution order per company: cached URL template → listing-page scrape (plain
+   HTTP, no agent) → agent raced with Search. Every candidate passes
+   `validate_document`: right period (the header's "period ended" statement), FORM
+   NL schedules, and the right insurer (`aliases`/`irdai_reg_no` in
+   `source_links.json`). A file already on disk is re-validated and quarantined as
+   `.rejected` if wrong.
 
 2. **Phase 2 — Extraction** (`extraction/`), run by `pipeline.run_phase2()`.
    Fills `Data_Engine_UI.xlsx` ("Data Engine" sheet) from three independent

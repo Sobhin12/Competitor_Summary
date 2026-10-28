@@ -13,6 +13,15 @@ from competitor_analysis import config as cfg
 
 from competitor_analysis.ingestion import scraper  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _no_listing_scrape(monkeypatch):
+    """process_company now reads the insurer's listing page before any agent;
+    these tests are no-network, so that step must find nothing by default."""
+    async def none(*a, **k):
+        return []
+    monkeypatch.setattr(scraper, "scrape_listing_links", none)
+
+
 Q3 = {"month": "December", "year": 2025}
 Q1_NEXT = {"month": "June", "year": 2026}
 
@@ -316,7 +325,7 @@ def test_race_promotes_agent_file_and_leaves_no_temp(tmp_path, monkeypatch):
     the canonical name and no '.agent' temp may be left behind."""
     monkeypatch.setattr(scraper, "URL_PATTERNS_FILE", tmp_path / "p.json")
 
-    async def fast_resolve(company_key, url, cal_data, processor, fy, feedback=None):
+    async def fast_resolve(company_key, url, cal_data, processor, fy, feedback=None, company=None):
         return {"download_url": "https://a.com/2025/december/x.pdf",
                 "document_title": "PD"}, "PDF"
 
@@ -491,3 +500,308 @@ def test_bare_two_digit_year_is_not_substituted():
     assert "1250" in t, f"an unrelated id was templatised: {t}"
     rendered = scraper.render_url_template(t, {"month": "June", "year": 2026}, "Q1")
     assert all("1250" in r for r in rendered), rendered
+
+
+# ---------------------------------------------------------------------------
+# Wrong-quarter guards (period must be the document's own, not just cited)
+# ---------------------------------------------------------------------------
+
+DEC_2025 = {"month": "December", "year": 2025}
+
+
+def test_two_digit_year_needs_a_delimiter_after_the_month():
+    """'December 25, 2024' is a day-of-month then a year; it used to satisfy
+    December 2025 because '25' was accepted as a 2-digit year."""
+    assert not scraper._mentions_period("signed on December 25, 2024", DEC_2025)
+    assert scraper._mentions_period("results for Dec-25", DEC_2025)
+    assert scraper._mentions_period("results for Dec'25", DEC_2025)
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Current-quarter header, prior-year comparative afterwards.
+    ("FOR THE QUARTER ENDED DECEMBER 31, 2025 ... Up to the period ended "
+     "Dec 31, 2024 ... FORM NL-1", True),
+    ("FOR THE PERIOD ENDED 31st DECEMBER 2025 FORM NL-1", True),
+    # A different quarter's filing that cites December 2025 as a comparative.
+    ("PUBLIC DISCLOSURES FOR THE QUARTER ENDED SEPTEMBER 30, 2025 ... "
+     "comparative December 2025 ... FORM NL-1", False),
+    # Last year's same quarter.
+    ("FOR THE QUARTER ENDED DECEMBER 31, 2024 ... as on 31/12/2025 FORM NL-1", False),
+])
+def test_header_period_must_be_the_target(text, expected):
+    assert scraper._period_is_stated_first(text, DEC_2025) is expected
+
+
+def test_no_header_statement_is_not_rejected_by_the_header_rule():
+    assert scraper._period_is_stated_first("some filing, Dec 2025", DEC_2025)
+
+
+def test_unreadable_document_is_rejected_not_accepted(tmp_path, monkeypatch):
+    """An unparseable file cannot be verified; accepting it let wrong files in."""
+    def boom(*a, **k):
+        raise ValueError("corrupt xref")
+    monkeypatch.setattr(scraper, "extract_lead_text", boom)
+    assert scraper.validate_document(
+        _fake_pdf(tmp_path, "x.pdf", ""), "pdf", DEC_2025, "ACME") is False
+
+
+# ---------------------------------------------------------------------------
+# Wrong-company guard
+# ---------------------------------------------------------------------------
+
+STAR = {"aliases": ["Star Health and Allied Insurance", "Star Health & Allied"],
+        "irdai_reg_no": "129"}
+CARE_TEXT = ("CARE HEALTH INSURANCE LIMITED IRDAI Registration No. 148 PUBLIC "
+             "DISCLOSURES FOR THE QUARTER ENDED DECEMBER 31, 2025 FORM NL-1-B-RA")
+
+
+def test_mentions_company_by_alias_or_registration_number():
+    assert scraper._mentions_company("STAR HEALTH AND ALLIED INSURANCE COMPANY LIMITED", STAR)
+    assert scraper._mentions_company("Star Health & Allied Insurance Co Ltd", STAR)
+    assert scraper._mentions_company("Registration Number: 129 Date of Registration", STAR)
+    assert not scraper._mentions_company(CARE_TEXT, STAR)
+
+
+def test_another_insurers_filing_is_rejected(tmp_path, monkeypatch):
+    """Same period, same FORM NL layout, wrong company: used to pass."""
+    monkeypatch.setattr(scraper, "extract_lead_text", lambda p, e, pages=6: CARE_TEXT)
+    monkeypatch.setattr(scraper, "_company_entry", lambda key: STAR)
+    pdf = _fake_pdf(tmp_path, "x.pdf", CARE_TEXT)
+    assert scraper.validate_document(pdf, "pdf", DEC_2025, "Star Health & Allied Insurance") is False
+    monkeypatch.setattr(scraper, "_company_entry", lambda key: {
+        "aliases": ["Care Health Insurance"], "irdai_reg_no": "148"})
+    assert scraper.validate_document(pdf, "pdf", DEC_2025, "Care Health Insurance") is True
+
+
+def test_company_without_identity_config_skips_the_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(scraper, "extract_lead_text", lambda p, e, pages=6: CARE_TEXT)
+    monkeypatch.setattr(scraper, "_company_entry", lambda key: {"name": "X"})
+    assert scraper.validate_document(
+        _fake_pdf(tmp_path, "x.pdf", CARE_TEXT), "pdf", DEC_2025, "X") is True
+
+
+def test_every_configured_insurer_has_an_identity():
+    sources = scraper.load_sources()
+    for key, data in sources.items():
+        if key == "GIC":
+            continue
+        assert data.get("aliases"), f"{key} has no aliases - its wrong-company check is off"
+
+
+def test_existing_wrong_file_is_quarantined_and_refetched(tmp_path, monkeypatch):
+    """Step 0 used to trust any file already on disk, so a wrong file saved
+    once stayed forever."""
+    monkeypatch.setattr(scraper, "URL_PATTERNS_FILE", tmp_path / "none.json")
+    (tmp_path / "ACME.pdf").write_bytes(b"%PDF-wrong")
+    monkeypatch.setattr(scraper, "validate_document", lambda *a, **k: False)
+
+    async def no_resolve(*a, **k):
+        return None, "PDF"
+
+    async def no_search(*a, **k):
+        return []
+
+    monkeypatch.setattr(scraper, "resolve_download_url", no_resolve)
+    monkeypatch.setattr(scraper, "search_fallback", no_search)
+    scraper.ATTEMPT_LOG.clear()
+    asyncio.run(scraper.process_company(
+        "ACME", {"quarterly_disclosure_page_link": "https://a.com"}, "FY25-26", "Q3", tmp_path))
+
+    assert not (tmp_path / "ACME.pdf").exists()
+    assert (tmp_path / "ACME.pdf.rejected").exists()
+    assert scraper.ATTEMPT_LOG["ACME"]["method"] != "already-downloaded"
+
+
+# ---------------------------------------------------------------------------
+# URL-pattern cache: the cases that made cached URLs useless next year
+# ---------------------------------------------------------------------------
+
+def test_delimited_two_digit_year_is_templatised_and_rerendered():
+    """Niva Bupa's '...Disclosure-December-25.pdf' kept '25' hardcoded, so the
+    cached URL could never find next year's file."""
+    url = "https://x.com/q/Website-Public-Disclosure-December-25.pdf?v=1.0"
+    t = scraper.templatize_url(url, Q3, "Q3")
+    assert "{yy}" in t and "-25." not in t
+    assert url in scraper.render_url_template(t, Q3, "Q3")
+    assert "https://x.com/q/Website-Public-Disclosure-June-26.pdf?v=1.0" in \
+        scraper.render_url_template(t, Q1_NEXT, "Q1")
+
+
+def test_two_digit_year_untouched_when_the_path_names_no_month():
+    t = scraper.templatize_url("https://x.com/2025/report-25.pdf", Q3, "Q3")
+    assert "report-25.pdf" in t, t
+
+
+def test_url_with_a_document_store_uuid_is_not_cached():
+    """ManipalCigna's Liferay URL embeds the upload's UUID - one specific file."""
+    url = ("https://x.com/documents/20124/0/Public+Disclosure+December-25+-Final.pdf/"
+           "6578a708-d64f-06fd-0ff5-2abcaa77e533?t=1782738561784")
+    assert scraper.templatize_url(url, Q3, "Q3") is None
+
+
+# ---------------------------------------------------------------------------
+# Listing-page scrape (no agent for server-rendered portals)
+# ---------------------------------------------------------------------------
+
+LISTING_HTML = """
+<ul>
+  <li><a href="/docs/Annual-Report-2025.pdf">Annual Report 2025</a></li>
+  <li><a href="/docs/Public-Disclosure-September-2025.pdf">Public Disclosure Sept 2025</a></li>
+  <li><a href="/docs/stewardship-december-2025.pdf">Stewardship disclosure December 2025</a></li>
+  <li><a href="/docs/Public-Disclosure-December-2025.pdf?x=1&amp;y=2">
+      <span>Quarterly Public Disclosure - Q3 FY 2025-26</span></a></li>
+  <li><a href="/about.html">Public disclosure December 2025</a></li>
+</ul>
+"""
+
+
+def test_listing_links_are_ranked_and_filtered():
+    links = scraper.extract_listing_links(
+        LISTING_HTML, "https://a.com/disclosures", Q3, "FY25-26", "Q3")
+    assert links[0] == "https://a.com/docs/Public-Disclosure-December-2025.pdf?x=1&y=2"
+    assert all(urlparse_path.endswith(".pdf") for urlparse_path in
+               (l.split("?")[0] for l in links))
+    assert "https://a.com/docs/Annual-Report-2025.pdf" not in links
+    # Negative-keyword document ranks below the real one, never above.
+    stew = "https://a.com/docs/stewardship-december-2025.pdf"
+    assert stew not in links or links.index(stew) > 0
+
+
+def test_listing_scrape_resolves_without_an_agent(tmp_path, monkeypatch):
+    monkeypatch.setattr(scraper, "URL_PATTERNS_FILE", tmp_path / "p.json")
+
+    async def links(*a, **k):
+        return ["https://a.com/docs/Public-Disclosure-December-2025.pdf"]
+
+    async def fake_download(company_key, download_url, file_type, target_dir,
+                            referer, cal_data, dest_name=None):
+        path = target_dir / (dest_name or "x")
+        path.write_bytes(b"%PDF-ok")
+        return path
+
+    async def boom(*a, **k):
+        raise AssertionError("an agent/Search call was made despite a good listing link")
+
+    monkeypatch.setattr(scraper, "scrape_listing_links", links)
+    monkeypatch.setattr(scraper, "download_file", fake_download)
+    monkeypatch.setattr(scraper, "resolve_download_url", boom)
+    monkeypatch.setattr(scraper, "search_fallback", boom)
+    scraper.ATTEMPT_LOG.clear()
+    asyncio.run(scraper.process_company(
+        "ACME", {"quarterly_disclosure_page_link": "https://a.com"}, "FY25-26", "Q3", tmp_path))
+
+    assert scraper.ATTEMPT_LOG["ACME"]["method"] == "listing-scrape"
+    assert (tmp_path / "ACME.pdf").exists()
+    # The winning link is remembered as next quarter's template.
+    assert "ACME" in scraper.load_url_patterns()
+
+
+def test_search_and_agent_are_told_which_insurer_they_want():
+    company = {"name": "Star Health & Allied Insurance Co Ltd", "irdai_reg_no": "129"}
+    objective, _ = scraper.build_objective(
+        "Star Health & Allied Insurance", "https://s.in", DEC_2025, "FY25-26", company)
+    assert "Star Health & Allied Insurance Co Ltd" in objective and "129" in objective
+
+
+# ---------------------------------------------------------------------------
+# Real downloaded filings (skipped if none are present)
+# ---------------------------------------------------------------------------
+
+def _downloaded_filings():
+    """(fy, quarter, company_key, path) for every company PDF on disk."""
+    from competitor_analysis import paths
+    sources = scraper.load_sources()
+    by_file = {cfg.download_filename(k, "pdf"): k for k in sources if k != "GIC"}
+    out = []
+    for f in sorted(paths.DOWNLOADS_DIR.glob("*/Q*/*.pdf")):
+        if f.name in by_file:
+            out.append((f.parent.parent.name, f.parent.name, by_file[f.name], f))
+    return out
+
+
+@pytest.mark.skipif(not _downloaded_filings(), reason="no downloaded filings on disk")
+def test_real_filings_match_only_their_own_company_and_period(monkeypatch):
+    """Every filing on disk validates for its own company and quarter and is
+    rejected for every other company, the adjacent quarters, and the same
+    quarter a year away. Text is read once per file; only validation logic runs."""
+    filings = _downloaded_filings()
+    texts = {f: scraper.extract_lead_text(f, "pdf") for _, _, _, f in filings}
+    current = {}
+    monkeypatch.setattr(scraper, "extract_lead_text",
+                        lambda p, e, pages=6: texts[current["f"]])
+    companies = sorted({k for _, _, k, _ in filings})
+    order = sorted({(fy, q) for fy, q, _, _ in filings})
+    all_periods = [(a, b) for a in sorted({fy for fy, _ in order})
+                   for b in ("Q1", "Q2", "Q3", "Q4")]
+    problems = []
+    for fy, q, key, f in filings:
+        current["f"] = f
+        cal = cfg.calendar_mapping(fy, q)
+        if not scraper.validate_document(f, "pdf", cal, key):
+            problems.append(f"own rejected: {fy} {q} {key}")
+        for other in companies:
+            if other != key and scraper.validate_document(f, "pdf", cal, other):
+                problems.append(f"{fy} {q} {key} accepted as {other}")
+        i = all_periods.index((fy, q))
+        for j in (i - 1, i + 1, i - 4, i + 4):
+            if 0 <= j < len(all_periods):
+                if scraper.validate_document(
+                        f, "pdf", cfg.calendar_mapping(*all_periods[j]), key):
+                    problems.append(f"{fy} {q} {key} accepted as {all_periods[j]}")
+    assert not problems, "\n".join(problems)
+
+
+# ---------------------------------------------------------------------------
+# Regressions found by the live FY25-26 Q4 run
+# ---------------------------------------------------------------------------
+
+def test_xlsx_candidate_with_temp_extension_is_readable(tmp_path):
+    """Candidates are saved as '.GIC.xlsx.cand0'; openpyxl refuses such a path,
+    which made every GIC file look unreadable (and so rejected)."""
+    import openpyxl
+    real = tmp_path / "real.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["GROSS DIRECT PREMIUM FOR THE PERIOD UPTO March 2026"])
+    wb.save(real)
+    temp = tmp_path / ".GIC.xlsx.cand0"
+    temp.write_bytes(real.read_bytes())
+    assert "March 2026" in scraper.extract_lead_text(temp, "xlsx")
+
+
+def test_a_wrong_document_is_not_downloaded_twice(tmp_path, monkeypatch):
+    calls = []
+
+    async def fetch(*a, **k):
+        calls.append(1)
+        return b"%PDF-wrong"
+
+    monkeypatch.setattr(scraper, "_fetch_bounded", fetch)
+    monkeypatch.setattr(scraper, "validate_document", lambda *a, **k: False)
+    got = asyncio.run(scraper.download_file(
+        "ACME", "https://a.com/x.pdf", "PDF", tmp_path, referer="https://a.com",
+        cal_data=Q3))
+    assert got is None
+    assert len(calls) == 1, "a document that validated as wrong was re-downloaded"
+
+
+def test_download_tls_uses_os_trust_store_with_verification_on():
+    """Aditya Birla's hosts fail certifi's bundle but verify against the OS
+    store. The fix must never weaken verification."""
+    import ssl
+    ctx = scraper._ssl_context()
+    assert isinstance(ctx, ssl.SSLContext), "fell back to the certifi default"
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+def test_ssl_falls_back_to_certifi_default_if_truststore_breaks(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def no_truststore(name, *a, **k):
+        if name == "truststore":
+            raise ImportError("simulated")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_truststore)
+    assert scraper._ssl_context() is True  # httpx's verified default, not False

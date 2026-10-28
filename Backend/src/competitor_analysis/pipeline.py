@@ -32,7 +32,8 @@ from competitor_analysis.extraction import data_engine as p
 log = logging_setup.get_logger(__name__)
 
 
-def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel=None):
+def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel=None,
+               prior_extract=True):
     """Runs Phase 2's 4 stages against an already-loaded worksheet. Does NOT
     load/save the workbook - callers own that.
 
@@ -88,6 +89,8 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     # workbook, but a long-lived process would otherwise print every earlier
     # run's column-resolution fallbacks mixed into this run's own).
     p.RESOLUTION_LOG.clear()
+    from competitor_analysis.extraction import prior_facts
+    prior_facts.reset_memo()
 
     # ---- Stage 0: label the value columns for the period being run ----
     with phase("Phase 2 / Headers"):
@@ -236,19 +239,19 @@ def run_phase2(ws, companies=None, run_gic=True, on_progress=None, should_cancel
     # Slides 16/17 (zone/state mix) and 23/25 (claims settlement schedules,
     # offices/employee counts) can have a real PRIOR-period gap even in a
     # clean run - some source schedules never carry a prior-year comparative
-    # at all. Last year's own run captured that same quarter's number back
-    # when it was "current" - reuse it here instead of leaving those charts
-    # current-period-only forever. No-ops (and says so) until a same-quarter
-    # run from last year actually exists on disk.
+    # at all. The figure exists in last year's own filing: resolved per
+    # company and metric by extraction.prior_facts (that PDF, else the saved
+    # facts file, else a validated old workbook). Whatever none of them has
+    # stays empty and is logged.
     with phase("Phase 2 / Prior Backfill"):
         t0 = time.time()
-        backfill_written, backfill_log = p.backfill_prior_from_last_year(ws)
+        backfill_written, backfill_log = p.backfill_prior_from_last_year(ws, extract=prior_extract)
         t_backfill = time.time() - t0
         if backfill_written:
-            log.info("%d prior-period cell(s) filled from last year's own filing (%s %s)  -  %.1fs",
+            log.info("%d prior-period cell(s) filled from %s %s  -  %.1fs",
                       backfill_written, cfg.prior_fy(), cfg.QUARTER, t_backfill)
         else:
-            log.info("no %s %s Data Engine archive found on disk - skipped.",
+            log.info("no prior-period gaps filled from %s %s (nothing missing, or no source found).",
                       cfg.prior_fy(), cfg.QUARTER)
 
     t_total = time.time() - t_start

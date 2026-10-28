@@ -91,7 +91,7 @@ DERIVED_METRIC_SPECS = [
               "time this was calibrated; not a documented spec)."},
 
     # --- Slide 30: Historical Trends duplicates of Slide 18 ---
-    # --- Slide 27: claims & grievances (current period; prior backfilled from last year's Data Engine) ---
+    # --- Slide 27: claims & grievances (current period; prior backfilled from last year's filing) ---
     {"key": "csr_amount_27", "slide": 27, "metric1": "Claim Settlement Ratio (Amount)", "metric2": None,
      "kind": "percent", "source": "derived", "companies": "all",
      "formula": "extract_nl37_amount_csr: settled / (O/S at beginning + reported - O/S at end), NL-37 amount block, Total column",

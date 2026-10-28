@@ -1318,7 +1318,7 @@ def slide_26(pdf, rows):
 # ---------------------------------------------------------------------------
 # Slide 27: Claims & Grievances - follows the Key Metrics pages (22-26) under
 # the same title. NL-37's amount block and NL-45 items 6/7, current period
-# read from the filing, prior backfilled from last year's Data Engine (see
+# read from the filing, prior backfilled from last year's filing (extraction/prior_facts.py) (see
 # data_engine.PRIOR_BACKFILL_TARGETS).
 # ---------------------------------------------------------------------------
 

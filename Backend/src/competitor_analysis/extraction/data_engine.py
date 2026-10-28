@@ -20,7 +20,6 @@ convention exists, not as something re-verifiable in-tree.
 import asyncio
 import argparse
 import gc
-import glob
 import json
 import math
 import os
@@ -1293,7 +1292,7 @@ def _nl31_table_and_blocks(pdf_path):
     # Only the current block is required. ABHI's third block is "Upto the
     # Year Ended 31st March <cur year>" - the previous FULL year, not the
     # same period last year - so no prior block is found and prior_start
-    # stays None (the prior is then backfilled from last year's Data Engine).
+    # stays None (the prior is then backfilled from last year's filing (extraction/prior_facts.py)).
     if cur_start is None:
         return None, None, None
     return table, cur_start, prior_start
@@ -1544,7 +1543,7 @@ def extract_it_capex(pdf_path):
     nothing is counted twice.
 
     Current period only - NL-14 has no prior-year Additions column (the
-    prior is backfilled from last year's Data Engine). Returns None if the
+    prior is backfilled from last year's filing (extraction/prior_facts.py)). Returns None if the
     schedule or its Additions column isn't found."""
     from competitor_analysis.extraction import pdf_cache
     doc = pdf_cache.get_company_json(pdf_path)
@@ -2278,7 +2277,7 @@ def apply_metric_to_rows(ws, idx, slide, company, metric1, metric2, cur, prior, 
 # time-only), or the gap is simply how Slides 16/17's zone/state mix landed
 # this quarter. The only place a real number for that same quarter-last-year
 # still exists is last year's OWN filing, captured back when it was the
-# "current" period - see backfill_prior_from_last_year().
+# "current" period - see prior_facts / backfill_prior_from_last_year().
 PRIOR_BACKFILL_TARGETS = (
     [(16, z, None) for z in ("North", "South", "East", "West", "Central")]
     + [(17, s, None) for s in ("Uttar Pradesh", "Maharashtra", "Karnataka", "Haryana",
@@ -2298,108 +2297,51 @@ PRIOR_BACKFILL_TARGETS = (
 )
 
 
-def _latest_prior_period_archive():
-    """Path to the most recently saved Data_Engine_{prior_fy}_{QUARTER}_*.xlsx
-    under artifacts/output/, or None if last year's same quarter was never
-    run (or its output no longer exists on disk). That file's own CURRENT-
-    period column holds exactly the figures this run wants as its prior-
-    period fallback - same quarter, one financial year earlier."""
-    pattern = str(paths.OUTPUT_DIR / f"Data_Engine_{cfg.prior_fy()}_{cfg.QUARTER}_*.xlsx")
-    matches = sorted(glob.glob(pattern))
-    return matches[-1] if matches else None
-
-
-_FY_START_ONROLL = {}
-
-
 def _fy_start_onroll(company):
-    """On-roll employees at the start of the reporting financial year - the
-    CURRENT "Employees / On-roll Employee" value in the newest saved
-    Data_Engine_{prior_fy}_Q4_*.xlsx (last year-end's NL-41 count). Matched
-    by Meric 1/Metric 2 text, not slide number, so a workbook from before a
-    slide renumbering still resolves. None if no such workbook or row."""
-    from competitor_analysis.reporting.theme import canonical_company
-    matches = sorted(glob.glob(str(paths.OUTPUT_DIR / f"Data_Engine_{cfg.prior_fy()}_Q4_*.xlsx")))
-    if not matches:
-        return None
-    path = matches[-1]
-    # Keyed by modification time too: a workbook edited in place during the
-    # review pause must not keep serving its pre-edit value to the server.
-    key = (path, os.path.getmtime(path))
-    if key not in _FY_START_ONROLL:
-        found = {}
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        try:
-            ws = wb["Data Engine"]
-            rows = ws.iter_rows(values_only=True)
-            header = [str(h).strip() if h is not None else "" for h in next(rows)]
-            col = cfg.period_column(cfg.prior_fy(), "Q4")
-            if col in header:
-                ci, mi, m1, m2 = (header.index(col), header.index("Company"),
-                                  header.index("Meric 1"), header.index("Metric 2"))
-                for r in rows:
-                    if (str(r[m1] or "").strip() == "Employees" and str(r[m2] or "").lower().startswith("on-roll")
-                            and isinstance(r[ci], (int, float))):
-                        key = canonical_company(str(r[mi] or ""))
-                        if key:
-                            found.setdefault(key, r[ci])
-        finally:
-            wb.close()
-        _FY_START_ONROLL[key] = found
-        log.info("Opening on-roll headcounts from %s: %d companies", os.path.basename(path), len(found))
-    return _FY_START_ONROLL[key].get(canonical_company(company))
+    """On-roll employees at the start of the reporting financial year - last
+    year-end's NL-41 count. Resolved by extraction.prior_facts (last year's
+    Q4 PDF, else its facts file, else a validated old workbook); None if no
+    source has it."""
+    from competitor_analysis.extraction import prior_facts
+    return prior_facts.opening_onroll(company)
 
 
-def backfill_prior_from_last_year(ws, dry_run=False):
+def backfill_prior_from_last_year(ws, dry_run=False, facts=None, extract=True):
     """Fills PRIOR-period gaps listed in PRIOR_BACKFILL_TARGETS from last
-    year's own Data Engine output for the same quarter, whose CUR column is
-    exactly the number this run wants as PRIOR. Never overwrites a prior
-    value this run's own extraction already found - a real number in THIS
-    filing always wins over a backfilled one, and a cell is only ever
+    year's figures for the same quarter, as resolved by extraction.prior_facts
+    (`facts` = its {company: {fact_key: value}} when the caller already has
+    it). Never overwrites a prior value this run's own extraction already
+    found - a real number in THIS filing always wins - and a cell is only ever
     touched if it's still empty. Returns (written_count, log)."""
-    archive_path = _latest_prior_period_archive()
-    if archive_path is None:
-        return 0, []
-    # NOT read_only=True: read-only worksheets only stream efficiently via
-    # iter_rows() - row_dict()'s per-header ws.cell(row=, column=) random
-    # access degrades to an XML re-scan per call in that mode (observed:
-    # 300s+ for one archive file vs. under a second fully loaded), the same
-    # reason load_engine() never uses it either.
-    archive_wb = openpyxl.load_workbook(archive_path, data_only=True)
-    try:
-        archive_ws = archive_wb["Data Engine"]
-        idx = build_row_index(ws)
-        archive_idx = build_row_index(archive_ws)
-        written = 0
-        log = []
-        for slide, metric1, metric2 in PRIOR_BACKFILL_TARGETS:
-            for company in COMPANY_PDFS:
-                key = (slide, normalize_text(company), normalize_text(metric1))
-                candidates = idx.get(key, [])
-                arch_candidates = archive_idx.get(key, [])
-                if metric2 is not None:
-                    target_m2 = normalize_text(metric2)
-                    candidates = [c for c in candidates if c[1] == target_m2]
-                    arch_candidates = [c for c in arch_candidates if c[1] == target_m2]
-                if not candidates or not arch_candidates:
+    from competitor_analysis.extraction import prior_facts
+    if facts is None:
+        facts, sources = prior_facts.get_prior_facts(list(COMPANY_PDFS), extract=extract)
+        for company, how in sources.items():
+            log.info("prior facts %-16s %s (%d values)", company, how, len(facts.get(company, {})))
+    idx = build_row_index(ws)
+    written = 0
+    applied = []
+    for slide, metric1, metric2 in PRIOR_BACKFILL_TARGETS:
+        key = prior_facts.fact_key(slide, metric1, metric2)
+        for company in COMPANY_PDFS:
+            value = facts.get(company, {}).get(key)
+            if value is None:
+                continue
+            candidates = idx.get((slide, normalize_text(company), normalize_text(metric1)), [])
+            if metric2 is not None:
+                candidates = [c for c in candidates if c[1] == normalize_text(metric2)]
+            for row, _ in candidates:
+                d = row_dict(ws, row)
+                if d[PRIOR] is not None:
                     continue
-                arch_cur = row_dict(archive_ws, arch_candidates[0][0])[CUR]
-                if arch_cur is None:
-                    continue
-                for row, _ in candidates:
-                    d = row_dict(ws, row)
-                    if d[PRIOR] is not None:
-                        continue
-                    if not dry_run:
-                        ws.cell(row=row, column=COL[PRIOR]).value = arch_cur
-                        g = growth(d[CUR], arch_cur)
-                        if g is not None:
-                            ws.cell(row=row, column=COL["Growth"]).value = g
-                    written += 1
-                    log.append((slide, company, metric1, metric2))
-        return written, log
-    finally:
-        archive_wb.close()
+                if not dry_run:
+                    ws.cell(row=row, column=COL[PRIOR]).value = value
+                    g = growth(d[CUR], value)
+                    if g is not None:
+                        ws.cell(row=row, column=COL["Growth"]).value = g
+                written += 1
+                applied.append((slide, company, metric1, metric2))
+    return written, applied
 
 
 def _converted_value(regrouped, kind_by_key, key):
@@ -2412,7 +2354,10 @@ def _converted_value(regrouped, kind_by_key, key):
     return (convert_value(ev.current, kind), convert_value(ev.prior, kind))
 
 
-def compute_derived_metrics(company, regrouped, kind_by_key, income):
+_LOOKUP = object()  # sentinel: caller did not supply an opening headcount
+
+
+def compute_derived_metrics(company, regrouped, kind_by_key, income, opening_onroll=_LOOKUP):
     """regrouped: {form_tag: schemas.FORM_SCHEMAS[form_tag] instance} from
     schemas.regroup_by_form() - one validated Pydantic object per in-scope
     NL-form. kind_by_key: {gemini_key: kind}, from master_metric_specs() -
@@ -2507,7 +2452,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
         manpower_prior = round_half_up(manpower_prior - 0.5 * in_house_prior, 2)
     # IT spend = NL-14 Additions to IT hardware + IT intangibles (see
     # extract_it_capex), not NL-7's IT expense line. Current period only -
-    # the prior is backfilled from last year's Data Engine.
+    # the prior is backfilled from last year's filing (extraction/prior_facts.py).
     it_cur, _ = income.get("it_capex", (None, None))
     D[(24, "Opex. To GWP ratio", None)] = (safe_div(opex_alone_cur, gwp_cur), safe_div(opex_alone_prior, gwp_prior))
     D[(24, "Manpower to GWP ratio", None)] = (safe_div(manpower_cur, gwp_cur), safe_div(manpower_prior, gwp_prior))
@@ -2523,7 +2468,7 @@ def compute_derived_metrics(company, regrouped, kind_by_key, income):
     # movement table can't supply the opening count: it is quarterly and
     # some filers (Care) include off-roll staff in it. Falls back to the
     # closing count alone when last year's Q4 workbook isn't on disk.
-    opening_employees = _fy_start_onroll(company)
+    opening_employees = _fy_start_onroll(company) if opening_onroll is _LOOKUP else opening_onroll
     avg_employees_cur = ((opening_employees + employees_cur) / 2 if opening_employees and employees_cur
                          else employees_cur)
     # Offices = the average of NL-41's opening and closing counts for the
@@ -2863,19 +2808,11 @@ def prefetch_gemini_metrics(companies, on_company_done=None, should_cancel=None)
     return results
 
 
-def apply_company_gemini_pipeline(ws, company, dry_run=False):
-    pdf_path = gemini_extract.COMPANY_PDFS[company]
-    full_name = COMPANY_FULL_NAME[company]
-    specs = gemini_extract.master_metric_specs()
-    # Prefer a result prefetched concurrently by prefetch_gemini_metrics; only
-    # fall back to a per-company call if this company wasn't prefetched (e.g.
-    # when this function is driven directly from the CLI).
-    raw = apply_company_gemini_pipeline._raw_cache.pop(company, None)
-    if raw is None:
-        log.info("fetching Gemini metrics for %s (%d metrics)...", company, len(specs))
-        raw = gemini_extract.extract_company_metrics(
-            full_name, pdf_path, specs, all_forms=gemini_extract.ALL_FORMS)
-
+def _assemble_company(company, specs, raw, inc):
+    """The shared middle of the per-company pipeline: shims `raw` for the
+    NL-29 / NL-41 quirks, regroups it by form and builds the `income` dict
+    compute_derived_metrics reads. No worksheet access, no caches, no audit.
+    Returns (regrouped, income, kind_by_key, rows_by_key, raw_for_derivation)."""
     kind_by_key = {m["key"]: m["kind"] for m in specs}
     rows_by_key = {m["key"]: m["rows"] for m in specs}
 
@@ -2898,10 +2835,6 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         raw_for_derivation[k_above10] = {"fy26_q3": None, "fy25_q3": None, "found": False,
                                          "source_form": None, "page_number": None,
                                          "evidence": None, "notes": None}
-    if company not in apply_income_statement_rows._cache:
-        apply_income_statement_rows._cache[company] = extract_income_statement(company, pdf_path)
-    inc = apply_income_statement_rows._cache[company]
-
     # On-roll headcount read straight off NL-41 wins over the model's answer
     # (which read CARE's FY24-25 Q4 "1 1,518" as 13,518). It feeds both the
     # Employees row - next year's opening headcount - and this period's
@@ -2940,6 +2873,27 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
         "cumulative_capital": inc.get("Cumulative Capital", (None, None)),
     }
 
+    return regrouped, income, kind_by_key, rows_by_key, raw_for_derivation
+
+
+def apply_company_gemini_pipeline(ws, company, dry_run=False):
+    pdf_path = gemini_extract.COMPANY_PDFS[company]
+    full_name = COMPANY_FULL_NAME[company]
+    specs = gemini_extract.master_metric_specs()
+    # Prefer a result prefetched concurrently by prefetch_gemini_metrics; only
+    # fall back to a per-company call if this company wasn't prefetched (e.g.
+    # when this function is driven directly from the CLI).
+    raw = apply_company_gemini_pipeline._raw_cache.pop(company, None)
+    if raw is None:
+        log.info("fetching Gemini metrics for %s (%d metrics)...", company, len(specs))
+        raw = gemini_extract.extract_company_metrics(
+            full_name, pdf_path, specs, all_forms=gemini_extract.ALL_FORMS)
+
+    if company not in apply_income_statement_rows._cache:
+        apply_income_statement_rows._cache[company] = extract_income_statement(company, pdf_path)
+    inc = apply_income_statement_rows._cache[company]
+    regrouped, income, kind_by_key, rows_by_key, _ = _assemble_company(company, specs, raw, inc)
+
     idx = build_row_index(ws)
     # NOT named `log` - this function also uses the module-level logger
     # above (log.info(...) when a company falls back to a live per-company
@@ -2974,7 +2928,36 @@ def apply_company_gemini_pipeline(ws, company, dry_run=False):
 
     write_extraction_audit(company, raw, rows_by_key, kind_by_key, derived)
 
+    if not dry_run:
+        # This company's figures become next year's prior-period facts. Never
+        # allowed to fail the run: a missing fact only costs a re-extraction.
+        try:
+            from competitor_analysis.extraction import prior_facts
+            prior_facts.record_current_facts(company, derived, inc, pdf_path)
+        except Exception:
+            log.exception("%s: could not record prior-period facts", company)
+
     return written, applied_log, raw
+
+
+def build_derived(company, pdf_path, raw=None, inc=None, opening_onroll=None):
+    """{(slide, metric1, metric2): (cur, prior)} for one company from one
+    filing, with no worksheet writes, no company-keyed caches touched and no
+    audit file - so it can run against a DIFFERENT period's PDF (see
+    extraction.prior_facts) without disturbing the current run.
+
+    `raw`/`inc` default to a fresh Gemini/direct-read extraction and income
+    statement parse of `pdf_path`. `opening_onroll` is passed straight to
+    compute_derived_metrics (None = no opening headcount, not "look it up")."""
+    specs = gemini_extract.master_metric_specs()
+    if raw is None:
+        raw = gemini_extract.extract_company_metrics(
+            COMPANY_FULL_NAME[company], pdf_path, specs, all_forms=gemini_extract.ALL_FORMS)
+    if inc is None:
+        inc = extract_income_statement(company, pdf_path)
+    regrouped, income, kind_by_key, _, _ = _assemble_company(company, specs, raw, inc)
+    return compute_derived_metrics(company, regrouped, kind_by_key, income,
+                                   opening_onroll=opening_onroll)
 
 
 # Populated by prefetch_gemini_metrics so the write stage can consume results

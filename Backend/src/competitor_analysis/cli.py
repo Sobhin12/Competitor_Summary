@@ -48,6 +48,9 @@ def parse_args():
     parser.add_argument("--data-engine",
                          help="--stage report / append-history: the Data Engine .xlsx to use (default: "
                               "the latest artifacts/output/Data_Engine_{FY}_{Quarter}_*.xlsx).")
+    parser.add_argument("--no-prior-extract", action="store_true",
+                         help="Don't re-extract last year's PDFs for the prior-period backfill; use "
+                              "the saved prior-facts file (then a validated old workbook) only.")
     parser.add_argument("--dry-run", action="store_true",
                          help="--stage append-history only: list what would be written, change nothing.")
     parser.add_argument("--download", choices=["yes", "no"],
@@ -101,7 +104,7 @@ def run_download(fy: str, quarter: str, companies: list[str] | None = None) -> d
     return avail
 
 
-def run_build(fy: str, quarter: str) -> dict:
+def run_build(fy: str, quarter: str, prior_extract: bool = True) -> dict:
     """Phase 2 + Phase 3 against whatever source files are on disk now.
     Returns a summary dict. Raises RuntimeError if there's nothing to build
     from at all."""
@@ -137,7 +140,8 @@ def run_build(fy: str, quarter: str) -> dict:
         wb, ws = p.load_engine(path=cfg.DATA_ENGINE_TEMPLATE)
         cleared = p.clear_period_values(ws)
         log.info("Cleared %d stale value cells from the template.", cleared)
-        run_full_pipeline.run_phase2(ws, companies=companies_found, run_gic=gic_available)
+        run_full_pipeline.run_phase2(ws, companies=companies_found, run_gic=gic_available,
+                                     prior_extract=prior_extract)
         os.makedirs(os.path.dirname(engine_path), exist_ok=True)
         wb.save(engine_path)
         log.info("Saved %s.", engine_path)
@@ -224,11 +228,12 @@ def run_report(fy: str, quarter: str, data_engine_path: str | None = None) -> st
     return out_path
 
 
-def run(fy: str, quarter: str, download: bool, companies: list[str] | None = None) -> dict:
+def run(fy: str, quarter: str, download: bool, companies: list[str] | None = None,
+        prior_extract: bool = True) -> dict:
     """Phase 1 (optional) then Phase 2 + 3, in one process."""
     if download:
         run_download(fy, quarter, companies=companies)
-    return run_build(fy, quarter)
+    return run_build(fy, quarter, prior_extract=prior_extract)
 
 
 def main():
@@ -242,13 +247,14 @@ def main():
         if stage == "download":
             run_download(args.fy, args.quarter, companies=companies)
         elif stage == "build":
-            run_build(args.fy, args.quarter)
+            run_build(args.fy, args.quarter, prior_extract=not args.no_prior_extract)
         elif stage == "report":
             run_report(args.fy, args.quarter, data_engine_path=args.data_engine)
         elif stage == "append-history":
             run_append_history(args.fy, args.quarter, data_engine_path=args.data_engine, dry_run=args.dry_run)
         else:
-            run(args.fy, args.quarter, download=True, companies=companies)
+            run(args.fy, args.quarter, download=True, companies=companies,
+                prior_extract=not args.no_prior_extract)
     except (ValueError, RuntimeError) as e:
         log.critical("%s", e)
         sys.exit(1)

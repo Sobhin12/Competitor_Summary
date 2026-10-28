@@ -56,6 +56,7 @@ OUTPUT_DIR = ARTIFACTS_DIR / "output"
 CACHE_DIR = ARTIFACTS_DIR / "cache"
 PDF_JSON_CACHE = CACHE_DIR / "pdf_json"
 GEMINI_CACHE = CACHE_DIR / "gemini"
+PRIOR_FACTS_DIR = CACHE_DIR / "prior_facts"
 EXTRACTION_AUDIT_DIR = CACHE_DIR / "extraction_audit"
 URL_PATTERNS_FILE = CACHE_DIR / "url_patterns.json"
 

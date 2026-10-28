@@ -9,6 +9,7 @@ matters most in the long-lived API server, where a second run for a different
 quarter reuses modules the first run already imported - see
 pdf_cache.refresh_company_pdfs().
 """
+import contextlib
 import os
 import re
 from datetime import datetime
@@ -179,6 +180,25 @@ def set_period(fy: str, quarter: str):
     FY, QUARTER = fy, quarter
     for fn in _period_listeners:
         fn()
+
+
+@contextlib.contextmanager
+def temporary_period(fy: str, quarter: str):
+    """Run a block against another reporting period, then restore the one
+    that was active (also when the block raises).
+
+    Both switches go through set_period(), so every on_period_change listener
+    (COMPANY_PDFS, the Data Engine column headers, ...) follows the period in
+    and back out. The period is process-global: this is safe only because a
+    pipeline run is the single writer (api/runs.py allows one run at a time),
+    so nothing else should be reading the period while a block is inside."""
+    prev = (FY, QUARTER)
+    set_period(fy, quarter)
+    try:
+        yield
+    finally:
+        if prev[0] is not None and prev[1] is not None:
+            set_period(*prev)
 
 
 def _require(fy, quarter):

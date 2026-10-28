@@ -179,6 +179,7 @@ def restore_all() -> None:
     # pdf_json only - never artifacts/cache/gemini (see module docstring).
     download_tree("artifacts/cache/pdf_json")
     download_tree("artifacts/cache/news")
+    download_tree("artifacts/cache/prior_facts")
 
 
 def sync_run_outputs() -> None:
@@ -191,3 +192,5 @@ def sync_run_outputs() -> None:
     # single most expensive thing a fresh container does. Scoped to
     # PDF_JSON_CACHE, never CACHE_DIR, to keep the Gemini cache local.
     upload_tree(paths.PDF_JSON_CACHE)
+    # Small, hand-auditable prior-period facts (extraction/prior_facts.py).
+    upload_tree(paths.PRIOR_FACTS_DIR)

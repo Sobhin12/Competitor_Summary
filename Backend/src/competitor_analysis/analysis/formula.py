@@ -1,12 +1,11 @@
 """
-Lenses: second-order insights for the executive "At a glance" view.
+Formula engine: evaluates a hypothesis' formula for every peer insurer.
 
-A lens is a small declarative spec - a per-company formula over metric ids,
-plus rules for when it is worth showing and what it is worth in rupees. The
-evaluator here is the ONLY place a lens figure is computed: nothing an LLM
-says ever becomes a number on the page, and every figure carries the fact ids
-it was built from. Because lenses are data, a new pattern is a new spec, not
-a code change (see lens_seed.py for the format).
+The investigating AI writes its own formulas (nothing is stored as a template);
+this module is the ONLY place an insight figure is computed, so nothing an LLM
+says ever becomes a number on the page. Each result carries the fact ids it was
+built from. Used by briefing.py for test_formula, claim verification and forward
+calls, and by screen.py.
 
 Formula language (a safe subset of Python expressions, parsed with `ast`):
   cur(m[, dim])    value of metric m this period       prior(m[, dim])  comparison value
@@ -23,8 +22,8 @@ Bases (the `basis` field):
            comparison = the previous quarter. Quarter-to-quarter analysis only.
            Flow metrics (crore amounts) only - a ratio or balance cannot be
            differenced, so build it from flows instead (claims / earned premium).
-A lens never mixes the two. A company whose inputs are missing for the period
-is left out of that lens rather than estimated.
+A spec never mixes the two. A company whose inputs are missing for the period
+is left out rather than estimated.
 """
 import ast
 import statistics
@@ -41,8 +40,8 @@ STOCK_METRICS = {"capital", "net_worth", "aum", "aum_policyholders", "aum_shareh
                  "solvency_ratio"}
 
 
-class LensError(ValueError):
-    """A malformed lens spec."""
+class FormulaError(ValueError):
+    """A malformed formula spec."""
 
 
 class _Skip(Exception):
@@ -57,20 +56,20 @@ _ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compar
 
 
 # ---------------------------------------------------------------------------
-# Validation (also the gate any machine-proposed lens will have to pass)
+# Validation (also the gate any AI-proposed hypothesis has to pass)
 # ---------------------------------------------------------------------------
 
 def _parse(expr, field):
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as e:
-        raise LensError(f"{field}: not a valid formula ({e.msg})")
+        raise FormulaError(f"{field}: not a valid formula ({e.msg})")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
-            raise LensError(f"{field}: {type(node).__name__} is not allowed in a lens formula")
+            raise FormulaError(f"{field}: {type(node).__name__} is not allowed in a formula")
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS or node.keywords:
-                raise LensError(f"{field}: only {', '.join(sorted(_FUNCS))} may be called")
+                raise FormulaError(f"{field}: only {', '.join(sorted(_FUNCS))} may be called")
     return tree
 
 
@@ -78,32 +77,32 @@ def _metric_args(tree):
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node.func.id not in {"abs", "min", "max"}:
             if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
-                raise LensError("metric names are passed as strings, e.g. cur('pbt')")
+                raise FormulaError("metric names are passed as strings, e.g. cur('pbt')")
             yield node.func.id, node.args[0].value
 
 
 def validate_spec(spec):
-    """Raise LensError unless the spec is well formed and uses real metrics."""
+    """Raise FormulaError unless the spec is well formed and uses real metrics."""
     for key in ("id", "title", "theme", "basis", "formula", "unit", "so_what"):
         if not spec.get(key):
-            raise LensError(f"lens {spec.get('id')!r}: missing {key!r}")
+            raise FormulaError(f"spec {spec.get('id')!r}: missing {key!r}")
     if spec["basis"] not in ("ytd", "quarter"):
-        raise LensError(f"lens {spec['id']!r}: basis must be 'ytd' or 'quarter'")
+        raise FormulaError(f"spec {spec['id']!r}: basis must be 'ytd' or 'quarter'")
     for field in ("formula", "require", "flag", "show_prior", "fires", "impact"):
         if not spec.get(field):
             continue
         tree = _parse(spec[field], field)
         for fn, metric in _metric_args(tree):
             if metric not in M.METRICS:
-                raise LensError(f"lens {spec['id']!r}: unknown metric {metric!r}")
+                raise FormulaError(f"spec {spec['id']!r}: unknown metric {metric!r}")
             if spec["basis"] == "quarter" and fn != "home_cur" and (
                     M.METRICS[metric].unit != "cr" or metric in STOCK_METRICS):
-                raise LensError(f"lens {spec['id']!r}: {metric!r} is not a flow, so it has no single-quarter "
+                raise FormulaError(f"spec {spec['id']!r}: {metric!r} is not a flow, so it has no single-quarter "
                                 f"figure - build a quarterly ratio from flows instead")
         names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id not in _FUNCS}
         peer = _PEER_VARS if field in ("fires", "impact") else set()
         if names - peer:
-            raise LensError(f"{field}: unknown name(s) {sorted(names - peer)}")
+            raise FormulaError(f"{field}: unknown name(s) {sorted(names - peer)}")
     return spec
 
 
@@ -146,7 +145,7 @@ def _eval(node, funcs, names):
     if isinstance(node, ast.Call):
         args = [_eval(a, funcs, names) for a in node.args]
         return funcs[node.func.id](*args)
-    raise LensError(f"cannot evaluate {type(node).__name__}")
+    raise FormulaError(f"cannot evaluate {type(node).__name__}")
 
 
 def _months(period):
@@ -162,7 +161,7 @@ def _previous_quarter(period):
 
 
 class _Inputs:
-    """Reads facts for one lens run under its basis, remembering which fact
+    """Reads facts for one evaluation under its basis, remembering which fact
     ids each company's figure came from."""
 
     def __init__(self, store, period, basis):
@@ -231,8 +230,8 @@ class _Fmt(dict):
         return "n/a"
 
 
-def run_lens(store, spec, period):
-    """Evaluate one lens for a period. Returns the structured result, or
+def evaluate(store, spec, period):
+    """Evaluate one spec for a period. Returns the structured result, or
     None when fewer than MIN_PEERS established insurers have the inputs."""
     validate_spec(spec)
     basis, unit = spec["basis"], spec["unit"]
@@ -305,33 +304,6 @@ def run_lens(store, spec, period):
         "evidence_ids": sorted({i for r in rows for i in r["ids"]}),
         "priority": spec.get("priority", 1.0),
     }
-
-
-def _score(lens):
-    """Rupee materiality where the lens has one; otherwise a modest default so
-    purely directional lenses rank below anything priced in crore."""
-    base = abs(lens["impact_cr"]) if lens["impact_cr"] is not None else 5.0
-    return base * lens["priority"] * (1.5 if lens["home"]["rank"] > lens["n"] / 2 else 1.0)
-
-
-def build(store, period=None, specs=None):
-    """All lenses for a period, fired ones ranked by materiality."""
-    from competitor_analysis.analysis import lens_seed, tools as T
-    period = T._period(store, period)
-    results, quiet, skipped = [], [], []
-    for spec in (specs if specs is not None else lens_seed.SEED_LENSES):
-        res = run_lens(store, spec, period)
-        if res is None:
-            skipped.append({"id": spec["id"], "title": spec["title"], "reason": "inputs missing for too many insurers"})
-        elif res["fired"]:
-            res["score"] = _score(res)
-            results.append(res)
-        else:
-            quiet.append({"id": res["id"], "title": res["title"]})
-    results.sort(key=lambda r: -r["score"])
-    return {"period": period, "period_label": S.period_label(period), "home": HOME,
-            "home_name": M.COMPANY_NAMES.get(HOME, HOME), "lenses": results, "quiet": quiet, "skipped": skipped,
-            "position_map": position_map(store, period)}
 
 
 def position_map(store, period):

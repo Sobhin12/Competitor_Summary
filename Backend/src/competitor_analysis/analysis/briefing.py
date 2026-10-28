@@ -27,7 +27,7 @@ import threading
 import time
 
 from competitor_analysis import paths
-from competitor_analysis.analysis import insights, lenses as L, llm, screen as Sc, verify
+from competitor_analysis.analysis import insights, formula as L, llm, screen as Sc, verify
 from competitor_analysis.analysis import metrics as M
 from competitor_analysis.analysis import store as S
 from competitor_analysis.analysis import tools as T
@@ -250,7 +250,7 @@ def _spec(args, **extra):
 
 
 def _slim(res):
-    """A run_lens result trimmed to what the AI and the briefing need."""
+    """An evaluate() result trimmed to what the AI and the briefing need."""
     return {"formula": res["formula"], "basis": res["basis"], "unit": res["unit"],
             "home": res["home"], "best": res["best"], "n": res["n"], "flagged": res["flagged"],
             "worst": res["worst"], "median": res["median"],
@@ -272,8 +272,8 @@ class Investigation:
     # -- tools --------------------------------------------------------------
     def _run(self, spec):
         try:
-            res = L.run_lens(self.store, spec, self.period)
-        except L.LensError as e:
+            res = L.evaluate(self.store, spec, self.period)
+        except L.FormulaError as e:
             raise T.ToolError(str(e))
         if res is None:
             raise T.ToolError("Too few established insurers have the inputs for this formula and period.")
@@ -396,7 +396,7 @@ class Investigation:
             for call in turn.tool_calls:
                 try:
                     content = json.dumps(self.dispatch(call.name, call.args), default=str)
-                except (T.ToolError, L.LensError, KeyError, TypeError, ValueError) as e:
+                except (T.ToolError, L.FormulaError, KeyError, TypeError, ValueError) as e:
                     content = json.dumps({"error": str(e)})
                     if call.name == "submit_finding":
                         self.rejected.append({"title": (call.args or {}).get("title", "?"), "reason": str(e)})
@@ -437,8 +437,8 @@ def grade_calls(store, prior, period):
     graded = []
     for call in (prior or {}).get("calls", []):
         try:
-            res = L.run_lens(store, {"id": "call", "title": "call", "theme": "call", "so_what": "{home}", **call["spec"]}, period)
-        except L.LensError:
+            res = L.evaluate(store, {"id": "call", "title": "call", "theme": "call", "so_what": "{home}", **call["spec"]}, period)
+        except L.FormulaError:
             res = None
         outcome = "cannot be assessed" if res is None else "came true" if res["fired"] else "has not happened"
         graded.append({"statement": call["statement"], "outcome": outcome, "was_true_before": call["baseline_true"],

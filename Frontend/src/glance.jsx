@@ -7,12 +7,9 @@ import {
 } from "./analysisShared.jsx";
 
 // ---------------------------------------------------------------------------
-// At a glance: the executive landing page. Ranked second-order insights
-// (lenses) written from NBHI's side, not a wall of numbers. Every figure is
-// computed by the backend lens engine; this view only lays them out.
+// At a glance: the executive landing page. See the briefing section below.
+// Every figure is computed by the backend formula engine; this view only lays it out.
 // ---------------------------------------------------------------------------
-
-const BASIS = { ytd: "Year to date", quarter: "Single quarter" };
 
 function PositionMap({ points }) {
   if (!points?.length) return null;
@@ -58,13 +55,13 @@ function PositionMap({ points }) {
   );
 }
 
-function PeerBars({ lens }) {
-  const vals = lens.rows.map((r) => r.value);
+function PeerBars({ data }) {
+  const vals = data.rows.map((r) => r.value);
   const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
   const span = hi - lo || 1;
   return (
     <div className="space-y-1.5 mt-3">
-      {lens.rows.map((r) => {
+      {data.rows.map((r) => {
         const left = ((Math.min(0, r.value) - lo) / span) * 100;
         const width = Math.max((Math.abs(r.value) / span) * 100, 1.5);
         return (
@@ -86,48 +83,6 @@ function PeerBars({ lens }) {
     </div>
   );
 }
-
-function LensCard({ lens, rank, onAsk }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Card className="p-5">
-      <div className="flex items-start gap-3">
-        <div className="w-7 h-7 shrink-0 rounded-full bg-brand-500/15 border border-brand-500/30 text-brand-300 text-xs font-semibold flex items-center justify-center">
-          {rank}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] uppercase tracking-wide text-slate-500">{lens.theme} · {BASIS[lens.basis]}</div>
-          <div className="text-sm font-semibold text-white mt-0.5">{lens.title}</div>
-          <p className="text-sm text-slate-300 mt-2 leading-relaxed">{lens.headline}</p>
-          <div className="flex flex-wrap items-center gap-2 mt-3">
-            <Badge tone="slate">NBHI ranks {lens.home.rank} of {lens.n}</Badge>
-            {lens.impact_display && <Badge tone="amber">{lens.impact_display} a year at stake</Badge>}
-          </div>
-        </div>
-      </div>
-      <PeerBars lens={lens} />
-      <div className="flex gap-4 mt-3 text-xs">
-        <button className="text-slate-400 hover:text-white" onClick={() => setOpen(!open)}>
-          {open ? "Hide" : "Show"} how this is calculated
-        </button>
-        {onAsk && (
-          <button className="text-brand-300 hover:text-white"
-                  onClick={() => onAsk(`Explain "${lens.title}" for NBHI and what we should do about it.`)}>
-            Ask more →
-          </button>
-        )}
-      </div>
-      {open && (
-        <div className="mt-2 rounded-lg bg-slate-900/70 p-3 text-xs text-slate-400 space-y-1">
-          <div><span className="text-slate-500">Formula</span> <code className="text-slate-300">{lens.formula}</code></div>
-          <div><span className="text-slate-500">Source figures</span> {lens.evidence_ids.length} Data Engine facts</div>
-          {lens.caveats.map((c) => <div key={c}>Caveat: {c}</div>)}
-        </div>
-      )}
-    </Card>
-  );
-}
-
 
 // ---------------------------------------------------------------------------
 // AI briefing. An AI analyst investigates the quarter, code re-computes every
@@ -208,7 +163,7 @@ function FindingCard({ f, onAsk }) {
       <p className="text-sm text-white mt-2 leading-relaxed">
         <span className="text-brand-300 font-medium">For NBHI: </span>{f.so_what}
       </p>
-      {claim && <PeerBars lens={claim} />}
+      {claim && <PeerBars data={claim} />}
       {f.caveats.map((c) => <p key={c} className="text-[11px] text-amber-300/80 mt-2">Caveat: {c}</p>)}
       <div className="flex gap-4 mt-3 text-xs">
         <button className="text-slate-400 hover:text-white" onClick={() => setOpen(!open)}>
@@ -330,25 +285,6 @@ function Briefing({ b, onAsk }) {
   );
 }
 
-function LensFallback({ onAsk }) {
-  const [state, setState] = useState({ loading: true, data: null, error: null });
-  useEffect(() => {
-    API.getGlance(null)
-      .then((data) => setState({ loading: false, data, error: null }))
-      .catch((error) => setState({ loading: false, data: null, error }));
-  }, []);
-  if (state.loading) return <LoadingCard label="Working out what matters…" />;
-  if (state.error) return <ErrorCard error={state.error} />;
-  return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-      <div className="space-y-4">
-        {state.data.lenses.map((l, i) => <LensCard key={l.id} lens={l} rank={i + 1} onAsk={onAsk} />)}
-      </div>
-      <PositionMap points={state.data.position_map} />
-    </div>
-  );
-}
-
 export function GlanceView({ onAsk }) {
   const { meta, error: metaError } = useAnalysisMeta();
   const [period, setPeriod] = useState(null);
@@ -393,15 +329,13 @@ export function GlanceView({ onAsk }) {
         <>
           <Card className="p-4 text-sm text-rose-300">The analysis did not complete: {d.error}</Card>
           <Button variant="ghost" onClick={() => load(true)}>Try again</Button>
-          <LensFallback onAsk={onAsk} />
         </>
       )}
       {d?.status === "unavailable" && (
         <>
           <Card className="p-4 text-sm text-amber-300">
-            The AI analyst is not configured ({d.reason}). Showing the rule-based view instead.
+            The AI analyst is not configured ({d.reason}). Set a model provider in Backend/.env to generate the briefing.
           </Card>
-          <LensFallback onAsk={onAsk} />
         </>
       )}
       {b && <Briefing b={b} onAsk={onAsk} />}

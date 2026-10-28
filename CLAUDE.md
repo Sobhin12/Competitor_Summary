@@ -161,16 +161,16 @@ invoked, and nothing in `runs.py`/`main.py`/`cli.py` calls it yet.
 ### The "At a glance" executive briefing (`Backend/src/competitor_analysis/analysis/`)
 
 The landing tab for the CEO/CFO. NBHI is the home company and every insight is written from its side; figures are
-year-to-date unless a lens says `basis: quarter` (single-quarter figures, flows only, for quarter-to-quarter analysis -
+year-to-date unless a hypothesis uses `basis: quarter` (single-quarter figures, flows only, for quarter-to-quarter analysis -
 never mixed with YTD). There is no human approval step by design: automated gates replace it. Flow:
 `screen.py` (statistical hints) → AI investigates → code verifies → AI challenges → code ranks → AI narrates.
 
-- **`lenses.py`** — the formula evaluator and the only place an insight figure is computed. A restricted `ast`
-  subset (`cur/prior/chg/gr/share/pshare`, arithmetic, comparisons) runs per company over the FactStore, tracks the
-  fact ids behind every number, and rejects unknown metrics, unsafe expressions and non-flow metrics on the quarter
-  basis (`validate_spec`). Early-stage insurers are excluded from peers; a company missing inputs is skipped, not
-  estimated. `lens_seed.py` is a fixed set of eight rule-based lenses, used only as the fallback when no LLM is
-  configured (`GET /api/analysis/glance`).
+- **`formula.py`** — the formula evaluator and the only place an insight figure is computed. There are no stored
+  lenses or templates: the AI writes its own formulas as hypotheses. A restricted `ast` subset
+  (`cur/prior/chg/gr/share/pshare`, arithmetic, comparisons) runs per company over the FactStore, tracks the fact ids
+  behind every number, and rejects unknown metrics, unsafe expressions and non-flow metrics on the quarter basis
+  (`validate_spec`). Early-stage insurers are excluded from peers; a company missing inputs is skipped, not
+  estimated. With no LLM configured the page says so; there is no rule-based fallback.
 - **`briefing.py`** — the AI path (`GET /api/analysis/briefing`, builds in a background thread on first open of a
   quarter, cached in `artifacts/cache/briefing/` by source fingerprint). The AI's tools are a read-only whitelist plus
   `test_formula` / `submit_finding` / `dismiss` / `submit_watch`. `submit_finding` re-runs every claim through the
@@ -186,7 +186,7 @@ never mixed with YTD). There is no human approval step by design: automated gate
   this also switches the chat tab. Gemini calls are paced to 15 RPM; transient and 429 errors are retried and a failed
   run keeps the findings verified so far (`BRIEFING_MIN_INTERVAL` overrides the pacing).
 - Frontend: `Frontend/src/glance.jsx` (default view) polls the briefing endpoint every 2s while it builds and shows
-  the live investigation log; it falls back to the lens cards when the LLM is unavailable.
+  the live investigation log; it shows a configuration message when no LLM is available.
 
 ### Cross-cutting things worth knowing
 

@@ -17,7 +17,7 @@ Read-only: it queries the FactStore and returns plain dicts.
 """
 import statistics
 
-from competitor_analysis.analysis import lenses as L
+from competitor_analysis.analysis import formula as L
 from competitor_analysis.analysis import metrics as M
 from competitor_analysis.analysis import store as S
 from competitor_analysis.analysis import tools as T
